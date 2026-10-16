@@ -4,6 +4,11 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import upstreamVersions from '../.upstream-versions.json' with { type: 'json' };
+import {
+  alignVendoredVitestDependencies,
+  REMOVED_VITEST_PACKAGES,
+  VITEST_EXACT_VERSION_PACKAGES,
+} from './vendored-vitest.ts';
 
 interface PnpmWorkspace {
   packages?: string[];
@@ -24,6 +29,8 @@ interface PnpmWorkspace {
 interface PackageJson {
   name?: string;
   version?: string;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
   exports?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -33,6 +40,7 @@ type ExportValue = string | { [condition: string]: string | ExportValue } | null
 const ROLLDOWN_DIR = 'rolldown';
 const VITE_DIR = 'vite';
 const CORE_PACKAGE_PATH = 'packages/core';
+const VITE_DEVTOOLS_PACKAGE = '@vitejs/devtools';
 
 function log(message: string) {
   console.log(`[sync-rolldown] ${message}`);
@@ -332,6 +340,22 @@ function mergePackageExports(
     );
 }
 
+export function syncViteDevtoolsDependencies(corePkg: PackageJson, vitePkg: PackageJson): void {
+  const devRange = vitePkg.devDependencies?.[VITE_DEVTOOLS_PACKAGE];
+  const peerRange = vitePkg.peerDependencies?.[VITE_DEVTOOLS_PACKAGE];
+
+  if (!devRange || !peerRange) {
+    throw new Error(
+      `Vite package.json must define ${VITE_DEVTOOLS_PACKAGE} in devDependencies and peerDependencies`,
+    );
+  }
+
+  corePkg.devDependencies ??= {};
+  corePkg.peerDependencies ??= {};
+  corePkg.devDependencies[VITE_DEVTOOLS_PACKAGE] = devRange;
+  corePkg.peerDependencies[VITE_DEVTOOLS_PACKAGE] = peerRange;
+}
+
 // Oxc-related packages that should use the higher version on conflict
 const OXC_PACKAGE_PREFIXES = [
   '@oxc-project/',
@@ -351,11 +375,9 @@ const OXC_PACKAGES = new Set([
   'oxlint',
   'oxlint-tsgolint',
 ]);
-const VITEST_DEPS = new Set(['tinybench']);
-
 // These packages should always use the highest version
 function syncedPackages(packageName: string): boolean {
-  if (OXC_PACKAGES.has(packageName) || VITEST_DEPS.has(packageName)) {
+  if (OXC_PACKAGES.has(packageName) || packageName === 'tinybench') {
     return true;
   }
   return OXC_PACKAGE_PREFIXES.some((prefix) => packageName.startsWith(prefix));
@@ -365,7 +387,7 @@ function mergeSemverVersions(
   v1: string,
   v2: string,
   packageName: string,
-  semver: typeof import('semver'),
+  verkit: typeof import('verkit'),
 ): string {
   // Handle special cases
   if (v1 === v2) {
@@ -381,8 +403,8 @@ function mergeSemverVersions(
       if (syncedPackages(packageName)) {
         const ver1 = v1.slice(1); // Remove '=' prefix
         const ver2 = v2.slice(1);
-        if (semver.valid(ver1) && semver.valid(ver2)) {
-          const higher = semver.gt(ver1, ver2) ? v1 : v2;
+        if (verkit.normalize(ver1) && verkit.normalize(ver2)) {
+          const higher = verkit.isGreaterThan(ver1, ver2) ? v1 : v2;
           log(`Resolving ${packageName} version conflict: ${v1} vs ${v2} -> ${higher}`);
           return higher;
         }
@@ -402,8 +424,8 @@ function mergeSemverVersions(
     return v1;
   }
 
-  const range1 = semver.validRange(v1);
-  const range2 = semver.validRange(v2);
+  const range1 = verkit.normalizeRange(v1);
+  const range2 = verkit.normalizeRange(v2);
 
   if (!range1 || !range2) {
     log(`Warning: Could not parse semver for ${packageName}: ${v1}, ${v2}. Using ${v1}`);
@@ -432,13 +454,13 @@ function mergeSemverVersions(
 
   // Both have same major version, return the higher one
   // Compare the minimum versions
-  const minVersion1 = semver.minVersion(range1);
-  const minVersion2 = semver.minVersion(range2);
+  const minVersion1 = verkit.findMinimumForRange(range1);
+  const minVersion2 = verkit.findMinimumForRange(range2);
 
   if (minVersion1 && minVersion2) {
-    if (semver.gt(minVersion1, minVersion2)) {
+    if (verkit.isGreaterThan(minVersion1, minVersion2)) {
       return v1;
-    } else if (semver.gt(minVersion2, minVersion1)) {
+    } else if (verkit.isGreaterThan(minVersion2, minVersion1)) {
       return v2;
     }
   }
@@ -461,7 +483,7 @@ function parseExcludeEntry(entry: string): { name: string; version?: string } {
 // Build a matcher for a version-less name pattern. The exclude list only ever
 // uses the `*` wildcard, so a tiny *-only glob (escape regex specials, `*` ->
 // `.*`, anchored) is enough and keeps `minimatch` out of this module: it is
-// loaded via dynamic import before the yaml/semver install fallback runs, so a
+// loaded via dynamic import before the yaml/verkit install fallback runs, so a
 // top-level dependency import could fail on a clean clone.
 function globToRegExp(pattern: string): RegExp {
   const escaped = pattern.replaceAll(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
@@ -498,7 +520,7 @@ export function mergePnpmWorkspaces(
   main: PnpmWorkspace,
   rolldown: PnpmWorkspace,
   rolldownVite: PnpmWorkspace,
-  semver: typeof import('semver'),
+  verkit: typeof import('verkit'),
 ): PnpmWorkspace {
   const result: PnpmWorkspace = { ...main };
 
@@ -512,26 +534,34 @@ export function mergePnpmWorkspaces(
   packagesSet.add(`${VITE_DIR}/packages/*`);
   result.packages = Array.from(packagesSet);
 
-  // Merge catalog
-  const catalog: Record<string, string> = { ...main.catalog };
-
-  // Add all entries from rolldown catalog
-  for (const [pkg, version] of Object.entries(rolldown.catalog || {})) {
-    if (catalog[pkg]) {
-      // Merge versions
-      catalog[pkg] = mergeSemverVersions(catalog[pkg], version, pkg, semver);
-    } else {
-      catalog[pkg] = version;
-    }
-  }
-
-  // Add all entries from vite catalog (if it has one)
-  for (const [pkg, version] of Object.entries(rolldownVite.catalog || {})) {
-    if (catalog[pkg]) {
-      // Merge versions
-      catalog[pkg] = mergeSemverVersions(catalog[pkg], version, pkg, semver);
-    } else {
-      catalog[pkg] = version;
+  // The upgrade script selects the latest supported Vitest release and updates
+  // the runtime constant with it. Upstream catalogs must not replace that pin.
+  const vitestVersion = main.catalog?.vitest;
+  const catalog: Record<string, string> = {};
+  for (const workspace of [main, rolldown, rolldownVite]) {
+    for (const [pkg, version] of Object.entries(workspace.catalog || {})) {
+      if (REMOVED_VITEST_PACKAGES.has(pkg)) {
+        // Unused upstream entries are harmless; actual dependency uses fail in
+        // alignVendoredVitestDependencies instead of reinstalling removed packages.
+        continue;
+      }
+      if (VITEST_EXACT_VERSION_PACKAGES.has(pkg)) {
+        if (
+          !vitestVersion ||
+          !/^5\.\d+\.\d+$/.test(vitestVersion) ||
+          verkit.normalize(vitestVersion) !== vitestVersion
+        ) {
+          throw new Error('The root Vitest catalog entry must be an exact stable v5 version');
+        }
+        catalog[pkg] = vitestVersion;
+      } else if (pkg === '@vitest/browser-webdriverio' && main.catalog?.[pkg]) {
+        // This community provider does not share the official release schedule.
+        catalog[pkg] = main.catalog[pkg];
+      } else {
+        catalog[pkg] = catalog[pkg]
+          ? mergeSemverVersions(catalog[pkg], version, pkg, verkit)
+          : version;
+      }
     }
   }
 
@@ -650,7 +680,7 @@ export function mergeWorkspaceYaml(
   rolldownSrc: string,
   rolldownViteSrc: string,
   yaml: typeof import('yaml'),
-  semver: typeof import('semver'),
+  verkit: typeof import('verkit'),
 ): string {
   const mainDoc = yaml.parseDocument(mainSrc);
   const rolldown = yaml.parse(rolldownSrc) as PnpmWorkspace | null;
@@ -660,7 +690,7 @@ export function mergeWorkspaceYaml(
     (mainDoc.toJSON() as PnpmWorkspace) ?? {},
     rolldown ?? {},
     rolldownVite ?? {},
-    semver,
+    verkit,
   );
 
   const stringifyOptions = { lineWidth: -1, singleQuote: true } as const;
@@ -855,17 +885,17 @@ export async function syncRemote() {
   // Dynamically import dependencies after git clone. Capture the whole `yaml`
   // module (we need `yaml.parseDocument` to preserve comments).
   let yaml: typeof import('yaml');
-  let semver: typeof import('semver');
+  let verkit: typeof import('verkit');
 
   try {
     yaml = await import('yaml');
-    semver = await import('semver');
+    verkit = await import('verkit');
   } catch {
     log('Dependencies not found, running pnpm install...');
     execCommand('pnpm install --no-frozen-lockfile', rootDir);
     log('Retrying imports...');
     yaml = await import('yaml');
-    semver = await import('semver');
+    verkit = await import('verkit');
   }
 
   log('Reading pnpm-workspace.yaml files...');
@@ -881,11 +911,27 @@ export async function syncRemote() {
   log('Merging pnpm-workspace.yaml files...');
 
   // Merge upstream catalogs into the main workspace while preserving its comments.
-  const yamlContent = mergeWorkspaceYaml(mainSrc, rolldownSrc, rolldownViteSrc, yaml, semver);
+  const yamlContent = mergeWorkspaceYaml(mainSrc, rolldownSrc, rolldownViteSrc, yaml, verkit);
 
+  const vitestVersion = (yaml.parse(yamlContent) as PnpmWorkspace).catalog?.vitest;
+  if (!vitestVersion || !verkit.normalize(vitestVersion)) {
+    throw new Error('The Vitest catalog entry must be an exact version');
+  }
   writeFileSync(mainWorkspacePath, yamlContent, 'utf-8');
+  alignVendoredVitestDependencies(rootDir, vitestVersion);
 
   log('✓ pnpm-workspace.yaml updated successfully!');
+
+  const corePackagePath = join(rootDir, CORE_PACKAGE_PATH, 'package.json');
+  const rolldownVitePackagePath = join(rootDir, VITE_DIR, 'packages', 'vite', 'package.json');
+  const corePackage = JSON.parse(readFileSync(corePackagePath, 'utf-8')) as PackageJson;
+  const rolldownVitePackage = JSON.parse(
+    readFileSync(rolldownVitePackagePath, 'utf-8'),
+  ) as PackageJson;
+
+  syncViteDevtoolsDependencies(corePackage, rolldownVitePackage);
+  writeFileSync(corePackagePath, JSON.stringify(corePackage, null, 2) + '\n', 'utf-8');
+  log('✓ package.json Vite DevTools ranges updated successfully!');
 
   execCommand('pnpm install --no-frozen-lockfile', rootDir);
 
@@ -896,9 +942,7 @@ export async function syncRemote() {
   // Merge package.json exports
   log('Merging package.json exports...');
 
-  const corePackagePath = join(rootDir, CORE_PACKAGE_PATH, 'package.json');
   const rolldownPackagePath = join(rootDir, ROLLDOWN_DIR, 'packages', 'rolldown', 'package.json');
-  const rolldownVitePackagePath = join(rootDir, VITE_DIR, 'packages', 'vite', 'package.json');
   const pluginutilsPackagePath = join(
     rootDir,
     ROLLDOWN_DIR,
@@ -910,11 +954,7 @@ export async function syncRemote() {
     'package.json',
   );
 
-  const corePackage = JSON.parse(readFileSync(corePackagePath, 'utf-8')) as PackageJson;
   const rolldownPackage = JSON.parse(readFileSync(rolldownPackagePath, 'utf-8')) as PackageJson;
-  const rolldownVitePackage = JSON.parse(
-    readFileSync(rolldownVitePackagePath, 'utf-8'),
-  ) as PackageJson;
   const pluginutilsPackage = JSON.parse(
     readFileSync(pluginutilsPackagePath, 'utf-8'),
   ) as PackageJson;

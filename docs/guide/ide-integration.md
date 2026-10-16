@@ -1,6 +1,6 @@
 # IDE Integration
 
-Vite+ supports VS Code and Zed through editor-specific settings that `vp create` and `vp migrate` can automatically write into your project.
+Vite+ supports VS Code, Zed, and JetBrains IDEs through editor-specific settings that `vp create` and `vp migrate` can automatically write into your project.
 
 ## VS Code
 
@@ -82,10 +82,22 @@ You can also manually set up the Zed config:
     "JavaScript": {
       "format_on_save": "on",
       "prettier": { "allowed": false },
-      "formatter": [{ "language_server": { "name": "oxfmt" } }],
-      "code_action": "source.fixAll.oxc"
+      "formatter": [
+        { "language_server": { "name": "oxfmt" } },
+        { "code_action": "source.fixAll.oxc" }
+      ]
+    },
+    "JSX": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
     },
     "TypeScript": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "TSX": {
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }]
@@ -108,8 +120,7 @@ For the best Vite+ experience with JetBrains IDEs such as IntelliJ & WebStorm, i
 When you create or migrate a project, Vite+ prompts you to choose whether you want the editor config written for JetBrains IDEs.
 
 ::: tip Vite+ does not merge with existing config files
-Due to some complexities with merging XML files, Vite+ currently does not merge your current files if the files already exist.
-You'll be given the opportunity to replace any existing files, instead of merging.
+Due to some complexities with merging XML files, Vite+ currently does not merge your current files if the files already exist. You'll be given the opportunity to replace any existing files, instead of merging.
 :::
 
 You can also manually set up the IDE configuration to match your Vite+ setup:
@@ -134,13 +145,15 @@ You can also manually set up the IDE configuration to match your Vite+ setup:
         "javascript.nodejs.core.library.configured.version": "24.18.0", // Replace with your selected Node.js version
         "javascript.nodejs.core.library.typings.version": "24.13.3", // Replace with the version of @types/node that corresponds to your runtime (or omit if you don't want it)
         "javascript.preferred.runtime.type.id": "node",
-        "nodejs_interpreter_path": "$USER_HOME$/.vite-plus/bin/node",
+        "nodejs_interpreter_path": "$USER_HOME$/.local/share/vite-plus/bin/node",
         "nodejs_package_manager_path": "pnpm" // Replace with your package manager of choice
       }
     }]]>
   </component>
 </project>
 ```
+
+This path assumes a new Unix installation using the default XDG directories. On Windows, use `%LOCALAPPDATA%\vite-plus\bin\node.exe`. Run `vp env current node` to check the resolved Node.js version and binary path. If you use a custom `VP_HOME` or XDG directories, or an older Vite+ installation, update `nodejs_interpreter_path` to the path of your Node.js shim.
 
 ```xml [.idea/OxfmtSettings.xml]
 <?xml version="1.0" encoding="UTF-8"?>

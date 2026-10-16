@@ -40,7 +40,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import {
   createServer,
@@ -265,6 +265,8 @@ const localPackuments = new Map<string, Packument>(); // package name -> local-o
 // Far in the past so package-manager minimum-release-age gates never
 // quarantine the locally served versions.
 const LOCAL_PACKAGE_TIME = '2020-01-01T00:00:00.000Z';
+const VITE_PLUS_PLATFORM_PACKAGE_PREFIX = '@voidzero-dev/vite-plus-cli-';
+const SLSA_PROVENANCE_V1 = 'https://slsa.dev/provenance/v1';
 if (packagesDir) {
   for (const basename of readdirSync(packagesDir)) {
     if (!basename.endsWith('.tgz')) {
@@ -286,6 +288,15 @@ if (packagesDir) {
             // that verifies it (npm, pnpm, yarn, bun) gets a match.
             integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
             shasum: createHash('sha1').update(bytes).digest('hex'),
+            // Supply the provenance metadata that npm adds to published platform
+            // packages so local test tarballs pass the installer check.
+            ...(pkg.name.startsWith(VITE_PLUS_PLATFORM_PACKAGE_PREFIX) && {
+              attestations: {
+                provenance: {
+                  predicateType: SLSA_PROVENANCE_V1,
+                },
+              },
+            }),
           },
         },
       },
@@ -364,6 +375,21 @@ async function resolveLocalPackument(name: string): Promise<Packument> {
     : local;
   mergedPackuments.set(name, merged);
   return merged;
+}
+
+function resolveLocalVersion(key: string): unknown {
+  const separator = key.lastIndexOf('/');
+  if (separator === -1) {
+    return undefined;
+  }
+  const name = key.slice(0, separator);
+  const specifier = key.slice(separator + 1);
+  const packument = localPackuments.get(name);
+  if (!packument) {
+    return undefined;
+  }
+  const version = packument['dist-tags'][specifier] ?? specifier;
+  return packument.versions[version];
 }
 
 // Stream the upstream response byte-for-byte. Unlike `fetch`, `https` does not
@@ -475,6 +501,15 @@ const server = createServer(async (req, res) => {
     res.end(serializeForRegistry(packument, registry));
     return;
   }
+  const localVersion = resolveLocalVersion(key);
+  if (localVersion) {
+    const address = server.address();
+    const registry =
+      address && typeof address !== 'string' ? `http://127.0.0.1:${address.port}` : '';
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(serializeForRegistry(localVersion, registry));
+    return;
+  }
   const tarMatch = key.match(/\/-\/([^/]+\.tgz)$/);
   if (tarMatch) {
     try {
@@ -499,7 +534,8 @@ const server = createServer(async (req, res) => {
 
 // Registry env for every package manager, each of which reads its own
 // spelling: npm and bun honor NPM_CONFIG_REGISTRY, pnpm >= 10.6 only reads
-// PNPM_CONFIG_* (older pnpm read the lowercase npm_config_* form), and Yarn
+// PNPM_CONFIG_* (pnpm 11.0 requires lowercase pnpm_config_*; older pnpm
+// read the lowercase npm_config_* form), and Yarn
 // Berry only reads YARN_-prefixed settings and refuses plain-http registries
 // unless the host is whitelisted.
 //
@@ -515,10 +551,19 @@ function buildRegistryEnv(registry: string): Record<string, string> {
   const noProxy = [process.env.NO_PROXY ?? process.env.no_proxy, '127.0.0.1']
     .filter(Boolean)
     .join(',');
+  // Windows CI snapshot jobs put TEMP on a ReFS Dev Drive, where Bun's
+  // cache/temp renames can fail with ENOTSUP. Keep its throwaway cache in
+  // the user profile and its temporary files on the same filesystem.
+  const bunCacheRoot =
+    process.platform === 'win32' && process.env.CI != null ? homedir() : tmpdir();
+  const bunCacheDir = mkdtempSync(path.join(bunCacheRoot, 'vp-local-registry-bun-'));
+  const bunTempDir = path.join(bunCacheDir, '.tmp');
+  mkdirSync(bunTempDir);
   return {
     NPM_CONFIG_REGISTRY: registry,
     npm_config_registry: registry,
     PNPM_CONFIG_REGISTRY: registry,
+    pnpm_config_registry: registry,
     YARN_NPM_REGISTRY_SERVER: registry,
     YARN_UNSAFE_HTTP_WHITELIST: '127.0.0.1',
     NO_PROXY: noProxy,
@@ -526,7 +571,11 @@ function buildRegistryEnv(registry: string): Record<string, string> {
     NPM_CONFIG_NOPROXY: noProxy,
     npm_config_noproxy: noProxy,
     YARN_GLOBAL_FOLDER: mkdtempSync(path.join(tmpdir(), 'vp-local-registry-yarn-')),
-    BUN_INSTALL_CACHE_DIR: mkdtempSync(path.join(tmpdir(), 'vp-local-registry-bun-')),
+    BUN_INSTALL_CACHE_DIR: bunCacheDir,
+    BUN_TMPDIR: bunTempDir,
+    // bunx uses the platform temp directory, not BUN_TMPDIR. Its lockfiles
+    // must not retain tarball URLs for a previous run's closed registry.
+    TMPDIR: bunTempDir,
   };
 }
 

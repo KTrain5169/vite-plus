@@ -5,7 +5,14 @@ import { rewriteScripts } from '../../../binding/index.js';
 import { type WorkspacePackage } from '../../types/index.ts';
 import { editJsonFile, readJsonFile } from '../../utils/json.ts';
 import { rulesDir } from '../../utils/path.ts';
-import { hasTsconfigTypesToRewrite, rewriteAllImports, rewriteTsconfigTypes } from '../migrator.ts';
+import {
+  dropDeadOxlintPluginsDependency,
+  hasTsconfigTypesToRewrite,
+  mergeTsdownConfigFile,
+  migrateTaskCacheConfigInViteConfig,
+  rewriteAllImports,
+  rewriteTsconfigTypes,
+} from '../migrator.ts';
 import { type MigrationReport } from '../report.ts';
 
 const RULES_YAML_PATH = path.join(rulesDir, 'vite-tools.yml');
@@ -73,9 +80,15 @@ export type PendingCoreMigration = {
 };
 
 export type CoreMigrationFinalizationResult = {
+  dependencies: boolean;
   scripts: boolean;
   tsconfigTypes: boolean;
   imports: boolean;
+  tsdownConfig: boolean;
+  taskCacheConfig: boolean;
+  // Kept out of the report so that review items alone do not make an
+  // up-to-date project run the rest of the migration.
+  taskCacheWarnings: string[];
 };
 
 function getCoreMigrationProjectPaths(workspaceInfo: CoreMigrationWorkspace): string[] {
@@ -137,9 +150,13 @@ export function finalizeCoreMigrationForExistingVitePlus(
 ): CoreMigrationFinalizationResult {
   const projectPaths = getCoreMigrationProjectPaths(workspaceInfo);
   const result: CoreMigrationFinalizationResult = {
+    dependencies: false,
     scripts: false,
     tsconfigTypes: false,
     imports: false,
+    tsdownConfig: false,
+    taskCacheConfig: false,
+    taskCacheWarnings: [],
   };
 
   if (pending.scripts) {
@@ -156,6 +173,23 @@ export function finalizeCoreMigrationForExistingVitePlus(
   }
 
   result.imports = rewriteAllImports(workspaceInfo.rootDir, silent, report, true);
+  result.dependencies = dropDeadOxlintPluginsDependency(
+    workspaceInfo.rootDir,
+    workspaceInfo.packages,
+  );
+
+  // Partial migrations can already have a Vite+ dependency while leaving
+  // tsdown.config.* undiscoverable by vp pack. Finalize those configs on the
+  // existing-Vite+ path just as the fresh migration path does.
+  for (const projectPath of projectPaths) {
+    result.tsdownConfig = mergeTsdownConfigFile(projectPath, silent, report) || result.tsdownConfig;
+  }
+
+  for (const projectPath of projectPaths) {
+    result.taskCacheConfig =
+      migrateTaskCacheConfigInViteConfig(projectPath, silent, report, result.taskCacheWarnings) ||
+      result.taskCacheConfig;
+  }
 
   return result;
 }

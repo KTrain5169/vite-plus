@@ -1,6 +1,6 @@
 # Run
 
-`vp run` runs `package.json` scripts and tasks defined in `vite.config.ts`. It works like `pnpm run`, with caching, dependency ordering, and workspace-aware execution built in.
+`vp run` runs `package.json` scripts and tasks defined in `vite.config.ts`. It works like `pnpm run`, with caching, dependency ordering, and workspace-aware execution built in. The task runner is available from both the [global CLI](/guide/global-cli) and the [project-local CLI](/guide/local-cli).
 
 ::: tip
 `vpr` is available as a standalone shorthand for `vp run`. All examples below work with both `vp run` and `vpr`.
@@ -32,11 +32,13 @@ building legacy app for production...
 Use `vp run` without a task name to use the interactive task runner:
 
 ```
-Select a task (↑/↓, Enter to run, Esc to clear):
+Select a task (↑/↓, Enter to run, type to search):
 
   › build: node compile-legacy-app.js
     test: jest
 ```
+
+With [shell completion](/guide/env#shell-completion) enabled, press Tab after `vp run ` or `vpr ` to complete task names from your project.
 
 ## Built-in Commands vs Scripts
 
@@ -69,7 +71,7 @@ $ node compile-legacy-app.js
 If nothing changes, the output is replayed from the cache on the next run:
 
 ```
-$ node compile-legacy-app.js ✓ cache hit, replaying
+$ node compile-legacy-app.js ◉ cache hit, replaying
 ✓ built in 69s
 
 ---
@@ -79,7 +81,7 @@ vp run: cache hit, 69s saved.
 If an input changes, the task runs again:
 
 ```
-$ node compile-legacy-app.js ✗ cache miss: 'legacy/index.js' modified, executing
+$ node compile-legacy-app.js ○ cache miss: 'legacy/index.js' modified, executing
 ```
 
 ## Task Definitions
@@ -95,7 +97,9 @@ export default defineConfig({
       build: {
         command: 'vp build',
         dependsOn: ['lint'],
-        env: ['NODE_ENV'],
+        cache: {
+          env: ['NODE_ENV'],
+        },
       },
       deploy: {
         command: 'deploy-script --prod',
@@ -248,18 +252,18 @@ $ vp build
 ✓ built in 28ms
 
 ---
-vp run: 0/2 cache hit (0%).
+vp run: 0/2 cache hit (0%), 2/2 successful.
 ```
 
-Each sub-task has its own cache entry. If only `.ts` files changed but lint still passes, only `vp build` runs again the next time `vp run --cache check` is called:
+Each sub-task has its own cache entry. For example, if a file used only by the build changes, such as `index.html`, only the build runs again the next time `vp run --cache check` is called:
 
 ```
-$ vp lint ✓ cache hit, replaying
-$ vp build ✗ cache miss: 'src/index.ts' modified, executing
+$ vp lint ◉ cache hit, replaying
+$ vp build ○ cache miss: 'index.html' modified, executing
 ✓ built in 30ms
 
 ---
-vp run: 1/2 cache hit (50%), 120ms saved.
+vp run: 1/2 cache hit (50%), 2/2 successful, 120ms saved.
 ```
 
 ### Nested `vp run`

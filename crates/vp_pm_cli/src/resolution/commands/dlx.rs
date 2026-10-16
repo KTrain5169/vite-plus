@@ -1,8 +1,7 @@
 use vp_pm_cli_macros::pm_args;
 
 use crate::resolution::{
-    Bun, CommandBuilder, CommandResolution, DiagnosticKind, Diagnostics, Npm, Pnpm, Resolution,
-    Resolve, Yarn,
+    Bun, CommandBuilder, CommandResolution, DiagnosticKind, Diagnostics, Npm, Pnpm, Resolve, Yarn,
 };
 
 #[pm_args]
@@ -115,10 +114,6 @@ impl Resolve<DlxArgs> for Bun {
 }
 
 impl DlxArgs {
-    pub(crate) fn resolve_npx_fallback(&self) -> Resolution {
-        Resolution { outcome: resolve_npx(self), diagnostics: Diagnostics::default() }
-    }
-
     fn split_command(&self) -> Option<(&str, &[String])> {
         self.args.split_first().map(|(package_spec, args)| (package_spec.as_str(), args))
     }
@@ -176,7 +171,7 @@ mod tests {
     use super::*;
     use crate::resolution::{
         resolve,
-        test_utils::{bun, expect_run, npm, parse_args, pnpm, yarn},
+        test_utils::{bun, expect_run, expect_unsupported, npm, parse_args, pnpm, yarn},
     };
 
     fn dlx_args(package_spec: &str, args: &[&str]) -> DlxArgs {
@@ -391,17 +386,10 @@ mod tests {
         assert_eq!(command.program, "npx");
         assert_eq!(command.args, vec!["--yes", "create-vue", "my-app"]);
         assert_eq!(resolution.diagnostics[0].kind, DiagnosticKind::FallbackCommand);
-    }
-
-    #[test]
-    fn no_project_fallback_uses_npx_without_a_diagnostic() {
-        let resolution = dlx_args("create-vue", &["my-app"]).resolve_npx_fallback();
-        let command = expect_run(resolution.outcome);
-
-        assert_eq!(command.program, "npx");
-        assert_eq!(command.args, vec!["--yes", "create-vue", "my-app"]);
-        assert!(resolution.diagnostics.is_empty());
-        assert!(command.env.is_empty());
+        assert_eq!(
+            command.env.get("npm_config_update_notifier").map(String::as_str),
+            Some("false")
+        );
     }
 
     #[test]
@@ -477,18 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn test_yarn_v2_dlx_shell_mode_warns_and_drops_flag() {
+    fn test_yarn_v2_dlx_rejects_shell_mode() {
         let mut options = dlx_args("echo", &["hello"]);
         options.shell_mode = true;
         let resolution = resolve(&yarn("4.0.0"), options);
-        let command = expect_run(resolution.outcome);
-
-        assert_eq!(command.program, "yarn");
-        assert_eq!(command.args, vec!["dlx", "echo", "hello"]);
-        assert_eq!(resolution.diagnostics.len(), 1);
-        assert_eq!(resolution.diagnostics[0].kind, DiagnosticKind::UnsupportedOptionDropped);
-        assert!(resolution.diagnostics[0].message.contains("--shell-mode"));
-        assert!(resolution.diagnostics[0].message.contains("yarn >=2"));
+        expect_unsupported(resolution, &["yarn >= 2 does not support --shell-mode."]);
     }
 
     #[test]
@@ -514,18 +495,11 @@ mod tests {
     }
 
     #[test]
-    fn test_bun_dlx_shell_mode_warns_and_drops_flag() {
+    fn test_bun_dlx_rejects_shell_mode() {
         let mut options = dlx_args("echo", &["hello"]);
         options.shell_mode = true;
         let resolution = resolve(&bun("1.3.11"), options);
-        let command = expect_run(resolution.outcome);
-
-        assert_eq!(command.program, "bun");
-        assert_eq!(command.args, vec!["x", "echo", "hello"]);
-        assert_eq!(resolution.diagnostics.len(), 1);
-        assert_eq!(resolution.diagnostics[0].kind, DiagnosticKind::UnsupportedOptionDropped);
-        assert!(resolution.diagnostics[0].message.contains("--shell-mode"));
-        assert!(resolution.diagnostics[0].message.contains("bun"));
+        expect_unsupported(resolution, &["bun does not support --shell-mode."]);
     }
 
     #[test]

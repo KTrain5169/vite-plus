@@ -1,10 +1,17 @@
 use clap::error::{ContextKind, ContextValue, ErrorKind};
-use owo_colors::OwoColorize;
+use console::style;
 use vp_error::Error;
 use vp_shared::output;
 use vt::ExitStatus;
 
 use super::types::SynthesizableSubcommand;
+
+/// Subcommands that exist only in the global `vp` binary.
+///
+/// Keep in sync with the self-management variants of `Commands` in
+/// `crates/vp_global_cli/src/cli.rs`; the local CLI cannot run them and only
+/// needs the names to point users at the global installation.
+const GLOBAL_ONLY_SUBCOMMANDS: &[&str] = &["env", "upgrade", "implode"];
 
 pub(super) fn handle_cli_parse_error(err: clap::Error) -> Result<ExitStatus, Error> {
     if matches!(err.kind(), ErrorKind::InvalidSubcommand) && print_invalid_subcommand_error(&err) {
@@ -36,19 +43,15 @@ fn is_vitest_help_flag(arg: &str) -> bool {
     matches!(arg, "-h" | "--help")
 }
 
-/// Help/version flags of the forwarded app tools (Vite and tsdown are
-/// cac-based: `-v, --version`; vp's own clap surface uses `-V`). Requests for
-/// these must always reach the tool, never target elicitation.
-pub(super) fn is_app_tool_help_or_version_flag(arg: &str) -> bool {
-    matches!(arg, "-h" | "--help" | "-v" | "-V" | "--version")
-}
-
 fn is_vitest_watch_flag(arg: &str) -> bool {
     matches!(arg, "-w" | "--watch")
 }
 
 fn is_vitest_test_subcommand(arg: &str) -> bool {
-    matches!(arg, "run" | "watch" | "dev" | "related" | "bench" | "init" | "list")
+    matches!(
+        arg,
+        "run" | "watch" | "dev" | "related" | "bench" | "init" | "list" | "doctor" | "complete"
+    )
 }
 
 fn has_flag_before_terminator(args: &[String], flag: &str) -> bool {
@@ -119,12 +122,24 @@ fn print_invalid_subcommand_error(error: &clap::Error) -> bool {
         return false;
     };
 
-    let highlighted_subcommand = invalid_subcommand.bright_blue().to_string();
+    if GLOBAL_ONLY_SUBCOMMANDS.contains(&invalid_subcommand.as_str()) {
+        let command =
+            style(format!("`{invalid_subcommand}`")).for_stderr().blue().bright().to_string();
+        output::error(&format!(
+            "The {command} command is only available in the global `vp` CLI. See {} to install it, then run the same command via the global `vp` binary.",
+            vp_shared::documentation_url("/guide/")
+        ));
+        return true;
+    }
+
+    let highlighted_subcommand =
+        style(&invalid_subcommand).for_stderr().blue().bright().to_string();
     output::error(&format!("Command '{highlighted_subcommand}' not found"));
 
     if let Some(suggestion) = suggestion {
         eprintln!();
-        let highlighted_suggestion = format!("`vp {suggestion}`").bright_blue().to_string();
+        let highlighted_suggestion =
+            style(format!("`vp {suggestion}`")).for_stderr().blue().bright().to_string();
         eprintln!("Did you mean {highlighted_suggestion}?");
     }
 
@@ -161,14 +176,14 @@ fn print_unknown_argument_error(error: &clap::Error) -> bool {
         return false;
     };
 
-    let highlighted_argument = invalid_argument.bright_blue().to_string();
+    let highlighted_argument = style(&invalid_argument).for_stderr().blue().bright().to_string();
     output::error(&format!("Unexpected argument '{highlighted_argument}'"));
 
     if has_pass_as_value_suggestion(error) {
         eprintln!();
         let pass_through_argument = format!("-- {invalid_argument}");
         let highlighted_pass_through_argument =
-            format!("`{}`", pass_through_argument.bright_blue());
+            format!("`{}`", style(&pass_through_argument).for_stderr().blue().bright());
         eprintln!("Use {highlighted_pass_through_argument} to pass the argument as a value");
     }
 
@@ -255,13 +270,15 @@ mod tests {
     }
 
     #[test]
-    fn test_with_run_subcommand_does_not_prepend_run() {
-        assert!(!should_prepend_vitest_run(&["run".to_string(), "--coverage".to_string()]));
-    }
-
-    #[test]
-    fn test_with_watch_subcommand_does_not_prepend_run() {
-        assert!(!should_prepend_vitest_run(&["watch".to_string()]));
+    fn test_with_subcommand_does_not_prepend_run() {
+        for args in [
+            vec!["run".to_string(), "--coverage".to_string()],
+            vec!["watch".to_string()],
+            vec!["doctor".to_string()],
+            vec!["complete".to_string(), "zsh".to_string()],
+        ] {
+            assert!(!should_prepend_vitest_run(&args), "unexpected run prefix for {args:?}");
+        }
     }
 
     #[test]
@@ -313,7 +330,7 @@ mod tests {
     fn global_subcommands_produce_invalid_subcommand_error() {
         use clap::error::ErrorKind;
 
-        for subcommand in ["config", "create", "env", "hooks", "migrate"] {
+        for subcommand in ["config", "create", "env", "hooks", "implode", "migrate", "upgrade"] {
             let error = CLIArgs::try_parse_from(["vp", subcommand])
                 .expect_err(&format!("expected error for global subcommand '{subcommand}'"));
             assert_eq!(

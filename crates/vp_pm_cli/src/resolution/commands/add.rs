@@ -16,23 +16,77 @@ pub struct AddArgs {
     pub(crate) save_exact: bool,
 
     /// Save the new dependency to the specified catalog name
-    #[arg(long, value_name = "CATALOG_NAME", not_supported(npm, yarn, bun))]
+    #[arg(long, value_name = "CATALOG_NAME", not_supported(npm, yarn, bun < "1.4"))]
     pub(crate) save_catalog_name: Option<String>,
 
     /// Save the new dependency to the default catalog
-    #[arg(long, not_supported(npm, yarn, bun))]
+    #[arg(long, not_supported(npm, yarn, bun < "1.4"))]
     pub(crate) save_catalog: bool,
 
     /// A list of package names allowed to run postinstall
     #[arg(long, value_name = "NAMES", not_supported(npm, yarn, bun))]
     pub(crate) allow_build: Option<String>,
 
+    /// Do not run lifecycle scripts
+    #[arg(long)]
+    pub(crate) ignore_scripts: bool,
+
+    /// Do not install optionalDependencies
+    #[arg(long, conflicts_with = "global", not_supported(yarn >= "2"))]
+    pub(crate) no_optional: bool,
+
+    /// Don't update lockfile
+    #[arg(
+        long,
+        conflicts_with = "global",
+        overrides_with = "no_frozen_lockfile",
+        not_supported(npm, pnpm, yarn >= "2")
+    )]
+    pub(crate) frozen_lockfile: bool,
+
+    /// Allow lockfile updates
+    #[arg(
+        long,
+        conflicts_with = "global",
+        overrides_with = "frozen_lockfile",
+        not_supported(npm, pnpm, yarn)
+    )]
+    pub(crate) no_frozen_lockfile: bool,
+
+    /// Only update lockfile, don't install
+    #[arg(long, conflicts_with = "global", not_supported(yarn < "3"))]
+    pub(crate) lockfile_only: bool,
+
+    /// Use cached packages when available
+    #[arg(long, conflicts_with = "global", not_supported(yarn >= "2", bun < "1.4.1"))]
+    pub(crate) prefer_offline: bool,
+
+    /// Only use packages already in cache
+    #[arg(long, conflicts_with = "global", not_supported(yarn >= "2", bun < "1.4.1"))]
+    pub(crate) offline: bool,
+
+    /// Force reinstall all dependencies
+    #[arg(short = 'f', long, conflicts_with = "global", not_supported(yarn >= "2"))]
+    pub(crate) force: bool,
+
+    /// Don't read or generate lockfile
+    #[arg(long, conflicts_with = "global", not_supported(yarn >= "2", bun))]
+    pub(crate) no_lockfile: bool,
+
+    /// Create flat node_modules (pnpm only)
+    #[arg(long, conflicts_with = "global", not_supported(npm, yarn, bun))]
+    pub(crate) shamefully_hoist: bool,
+
+    /// Suppress Vite+ output and enable native silent mode where supported
+    #[arg(long, conflicts_with = "global", not_supported(yarn >= "2"))]
+    pub(crate) silent: bool,
+
     /// Filter packages in monorepo (can be used multiple times)
-    #[arg(long, value_name = "PATTERN", not_supported(bun))]
+    #[arg(long, value_name = "PATTERN", not_supported(yarn < "2", bun < "1.4"))]
     pub(crate) filter: Vec<String>,
 
     /// Add to workspace root
-    #[arg(short = 'w', long, not_supported(bun))]
+    #[arg(short = 'w', long, not_supported(yarn >= "2", bun))]
     pub(crate) workspace_root: bool,
 
     /// Only add if package exists in workspace (pnpm-specific)
@@ -146,7 +200,17 @@ impl Resolve<AddArgs> for Pnpm {
         if let Some(allow_build) = &args.allow_build {
             cmd.arg(vt_str::format!("--allow-build={allow_build}"));
         }
-        cmd.extend(args.pass_through_args.iter()).extend(args.packages.iter());
+        cmd.arg_if("--ignore-scripts", args.ignore_scripts)
+            .arg_if("--no-optional", args.no_optional)
+            .arg_if("--lockfile-only", args.lockfile_only)
+            .arg_if("--prefer-offline", args.prefer_offline)
+            .arg_if("--offline", args.offline)
+            .arg_if("--force", args.force)
+            .arg_if("--no-lockfile", args.no_lockfile)
+            .arg_if("--shamefully-hoist", args.shamefully_hoist)
+            .arg_if("--silent", args.silent)
+            .extend(args.pass_through_args.iter())
+            .extend(args.packages.iter());
         cmd.into()
     }
 }
@@ -157,6 +221,7 @@ impl Npm {
         if args.global {
             cmd.arg("install")
                 .arg("--global")
+                .arg_if("--ignore-scripts", args.ignore_scripts)
                 .extend(args.pass_through_args.iter())
                 .extend(args.packages.iter());
             return cmd.into();
@@ -181,8 +246,17 @@ impl Npm {
             None => {}
         }
         cmd.arg_if("--save-exact", args.save_exact)
-            .extend(args.pass_through_args.iter())
-            .extend(args.packages.iter());
+            .arg_if("--ignore-scripts", args.ignore_scripts)
+            .arg_if("--omit=optional", args.no_optional)
+            .arg_if("--package-lock-only", args.lockfile_only)
+            .arg_if("--prefer-offline", args.prefer_offline)
+            .arg_if("--offline", args.offline)
+            .arg_if("--force", args.force)
+            .arg_if("--no-package-lock", args.no_lockfile);
+        if args.silent {
+            cmd.arg("--loglevel").arg("silent");
+        }
+        cmd.extend(args.pass_through_args.iter()).extend(args.packages.iter());
         cmd.into()
     }
 }
@@ -194,7 +268,7 @@ impl Resolve<AddArgs> for Npm {
 }
 
 impl Resolve<AddArgs> for Yarn {
-    fn resolve(&self, args: &AddArgs, _diag: &mut Diagnostics) -> CommandResolution {
+    fn resolve(&self, args: &AddArgs, diag: &mut Diagnostics) -> CommandResolution {
         if args.global {
             return Npm::resolve_add(args);
         }
@@ -204,7 +278,7 @@ impl Resolve<AddArgs> for Yarn {
             cmd.arg("workspaces").arg("foreach").arg("--all");
             cmd.repeated("--include", args.filter.iter());
         }
-        cmd.arg("add");
+        cmd.arg("add").arg_if("-W", args.workspace_root && !self.is_berry());
         match args.save_dependency.target() {
             Some(SaveDependencyTarget::Dev) => {
                 cmd.arg("--dev");
@@ -217,9 +291,20 @@ impl Resolve<AddArgs> for Yarn {
             }
             Some(SaveDependencyTarget::Production) | None => {}
         }
-        cmd.arg_if("--exact", args.save_exact)
-            .extend(args.pass_through_args.iter())
-            .extend(args.packages.iter());
+        cmd.arg_if("--exact", args.save_exact);
+        if self.is_berry() {
+            Self::apply_berry_install_mode(&mut cmd, args.lockfile_only, args.ignore_scripts, diag);
+        } else {
+            cmd.arg_if("--frozen-lockfile", args.frozen_lockfile)
+                .arg_if("--ignore-scripts", args.ignore_scripts)
+                .arg_if("--ignore-optional", args.no_optional)
+                .arg_if("--prefer-offline", args.prefer_offline)
+                .arg_if("--offline", args.offline)
+                .arg_if("--force", args.force)
+                .arg_if("--no-lockfile", args.no_lockfile)
+                .arg_if("--silent", args.silent);
+        }
+        cmd.extend(args.pass_through_args.iter()).extend(args.packages.iter());
         cmd.into()
     }
 }
@@ -230,7 +315,7 @@ impl Resolve<AddArgs> for Bun {
             return Npm::resolve_add(args);
         }
         let mut cmd = CommandBuilder::new("bun");
-        cmd.arg("add");
+        cmd.arg("add").repeated("--filter", args.filter.iter());
         match args.save_dependency.target() {
             Some(SaveDependencyTarget::Dev) => {
                 cmd.arg("--dev");
@@ -243,9 +328,30 @@ impl Resolve<AddArgs> for Bun {
             }
             Some(SaveDependencyTarget::Production) | None => {}
         }
+        if let Some(name) = &args.save_catalog_name {
+            if name.is_empty() {
+                cmd.arg("--catalog");
+            } else {
+                cmd.arg(vt_str::format!("--catalog={name}"));
+            }
+        }
         cmd.arg_if("--exact", args.save_exact)
-            .extend(args.pass_through_args.iter())
-            .extend(args.packages.iter());
+            .arg_if("--catalog", args.save_catalog)
+            .arg_if("--ignore-scripts", args.ignore_scripts)
+            .arg_if("--lockfile-only", args.lockfile_only)
+            .arg_if("--prefer-offline", args.prefer_offline)
+            .arg_if("--offline", args.offline)
+            .arg_if("--force", args.force)
+            .arg_if("--silent", args.silent);
+        if args.no_optional {
+            cmd.arg("--omit").arg("optional");
+        }
+        if args.no_frozen_lockfile {
+            cmd.arg("--no-frozen-lockfile");
+        } else {
+            cmd.arg_if("--frozen-lockfile", args.frozen_lockfile);
+        }
+        cmd.extend(args.pass_through_args.iter()).extend(args.packages.iter());
         cmd.into()
     }
 }
@@ -254,8 +360,8 @@ impl Resolve<AddArgs> for Bun {
 mod tests {
     use super::*;
     use crate::resolution::{
-        resolve,
-        test_utils::{bun, expect_run, npm, parse_args, pnpm, yarn},
+        DiagnosticKind, resolve,
+        test_utils::{bun, expect_run, expect_unsupported, npm, parse_args, pnpm, yarn},
     };
 
     fn add_args(packages: &[&str]) -> AddArgs {
@@ -417,10 +523,10 @@ mod tests {
     }
 
     #[test]
-    fn test_yarn_add_with_workspace() {
+    fn test_yarn_berry_add_with_workspace() {
         let mut options = add_args(&["react"]);
         options.filter = vec!["app".to_string()];
-        let resolution = resolve(&yarn("1.22.22"), options);
+        let resolution = resolve(&yarn("4.0.0"), options);
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "yarn");
@@ -428,6 +534,38 @@ mod tests {
             command.args,
             vec!["workspaces", "foreach", "--all", "--include", "app", "add", "react"]
         );
+    }
+
+    #[test]
+    fn test_yarn_classic_rejects_filtered_add() {
+        for filters in
+            [vec!["app".to_string()], vec!["app-*".to_string(), "@scope/web".to_string()]]
+        {
+            let mut options = add_args(&["react"]);
+            options.filter = filters;
+            let resolution = resolve(&yarn("1.22.22"), options);
+
+            expect_unsupported(resolution, &["yarn < 2 does not support --filter."]);
+        }
+    }
+
+    #[test]
+    fn test_yarn_classic_add_aggregates_unsupported_options() {
+        let args =
+            parse_args::<AddArgs>(["react", "--filter", "app", "--save-catalog", "--workspace"])
+                .unwrap();
+        expect_unsupported(
+            resolve(&yarn("1.22.22"), args),
+            &[
+                "yarn does not support --save-catalog.",
+                "yarn < 2 does not support --filter.",
+                "yarn does not support --workspace.",
+            ],
+        );
+        let args = parse_args::<AddArgs>(["react", "--", "--filter", "app"]).unwrap();
+        let resolution = resolve(&yarn("1.22.22"), args);
+        assert!(resolution.diagnostics.is_empty());
+        assert_eq!(expect_run(resolution.outcome).args, vec!["add", "--filter", "app", "react"]);
     }
 
     #[test]
@@ -439,7 +577,7 @@ mod tests {
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "yarn");
-        assert_eq!(command.args, vec!["add", "--dev", "typescript"]);
+        assert_eq!(command.args, vec!["add", "-W", "--dev", "typescript"]);
         assert!(resolution.diagnostics.is_empty());
     }
 
@@ -523,6 +661,68 @@ mod tests {
     }
 
     #[test]
+    fn yarn_add_frozen_lockfile_options_follow_native_support() {
+        let args = parse_args::<AddArgs>(["--frozen-lockfile", "react"]).unwrap();
+        let resolution = resolve(&yarn("1.22.22"), args.clone());
+        assert!(resolution.diagnostics.is_empty());
+        assert_eq!(expect_run(resolution.outcome).args, ["add", "--frozen-lockfile", "react"]);
+        expect_unsupported(
+            resolve(&yarn("2.0.0"), args),
+            &["yarn >= 2 does not support --frozen-lockfile."],
+        );
+        for version in ["1.22.22", "2.0.0"] {
+            let args = parse_args::<AddArgs>(["--no-frozen-lockfile", "react"]).unwrap();
+            expect_unsupported(
+                resolve(&yarn(version), args),
+                &["yarn does not support --no-frozen-lockfile."],
+            );
+        }
+    }
+
+    #[test]
+    fn yarn_lockfile_only_takes_priority_over_ignore_scripts() {
+        let resolution = resolve(
+            &yarn("4.0.0"),
+            AddArgs { lockfile_only: true, ignore_scripts: true, ..add_args(&["react"]) },
+        );
+        let command = expect_run(resolution.outcome);
+        assert_eq!(command.args, ["add", "--mode", "update-lockfile", "react"]);
+        assert_eq!(resolution.diagnostics.len(), 1);
+        assert_eq!(resolution.diagnostics[0].kind, DiagnosticKind::BehaviorChange);
+    }
+
+    #[test]
+    fn add_install_options_do_not_change_managed_global_commands() {
+        for flag in [
+            "--no-optional",
+            "--frozen-lockfile",
+            "--no-frozen-lockfile",
+            "--lockfile-only",
+            "--prefer-offline",
+            "--offline",
+            "--force",
+            "--no-lockfile",
+            "--shamefully-hoist",
+            "--silent",
+        ] {
+            let error = parse_args::<AddArgs>(["--global", flag, "react"]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{flag}");
+        }
+    }
+
+    #[test]
+    fn add_frozen_lockfile_flags_use_last_value() {
+        for (first, last) in [
+            ("--frozen-lockfile", "--no-frozen-lockfile"),
+            ("--no-frozen-lockfile", "--frozen-lockfile"),
+        ] {
+            let args = parse_args::<AddArgs>([first, last, "react"]).unwrap();
+            let command = expect_run(resolve(&bun("1.3.11"), args).outcome);
+            assert_eq!(command.args, ["add", last, "react"]);
+        }
+    }
+
+    #[test]
     fn test_bun_basic_add() {
         let resolution = resolve(&bun("1.3.11"), add_args(&["react"]));
         let command = expect_run(resolution.outcome);
@@ -532,44 +732,81 @@ mod tests {
     }
 
     #[test]
-    fn yarn_drops_workspace_root_without_warning() {
+    fn yarn_berry_rejects_unsupported_workspace_root() {
         let mut args = add_args(&["react"]);
         args.workspace_root = true;
-
-        let classic = resolve(&yarn("1.22.22"), args.clone());
-        let classic_command = expect_run(classic.outcome);
-        let berry = resolve(&yarn("4.1.0"), args);
-        let berry_command = expect_run(berry.outcome);
-
-        assert_eq!(classic_command.program, "yarn");
-        assert_eq!(classic_command.args, vec!["add", "react"]);
-        assert_eq!(berry_command.program, "yarn");
-        assert_eq!(berry_command.args, vec!["add", "react"]);
-        assert!(classic.diagnostics.is_empty());
-        assert!(berry.diagnostics.is_empty());
+        let resolution = resolve(&yarn("4.1.0"), args);
+        expect_unsupported(resolution, &["yarn >= 2 does not support --workspace-root."]);
     }
 
     #[test]
-    fn bun_warns_for_unsupported_options() {
+    fn bun_rejects_all_unsupported_options() {
         let mut options = add_args(&["react"]);
         options.filter = vec!["app".to_string()];
         options.workspace_root = true;
         options.workspace = true;
         options.save_catalog = true;
         options.allow_build = Some("react".to_string());
+        options.prefer_offline = true;
+        options.offline = true;
         let resolution = resolve(&bun("1.3.11"), options);
+        expect_unsupported(
+            resolution,
+            &[
+                "bun < 1.4 does not support --save-catalog.",
+                "bun does not support --allow-build.",
+                "bun < 1.4.1 does not support --prefer-offline.",
+                "bun < 1.4.1 does not support --offline.",
+                "bun < 1.4 does not support --filter.",
+                "bun does not support --workspace-root.",
+                "bun does not support --workspace.",
+            ],
+        );
+    }
+
+    #[test]
+    fn bun_1_4_1_forwards_offline_options() {
+        // https://bun.sh/blog/bun-v1.4.1
+        let mut options = add_args(&["react"]);
+        options.prefer_offline = true;
+        options.offline = true;
+        let resolution = resolve(&bun("1.4.1"), options);
+        assert!(resolution.diagnostics.is_empty());
+        assert_eq!(
+            expect_run(resolution.outcome).args,
+            vec!["add", "--prefer-offline", "--offline", "react"]
+        );
+    }
+
+    #[test]
+    fn bun_1_4_supports_named_catalog() {
+        for (name, flag) in [("testing", "--catalog=testing"), ("", "--catalog")] {
+            let mut options = add_args(&["react"]);
+            options.save_catalog_name = Some(name.to_string());
+            let resolution = resolve(&bun("1.4.0"), options);
+            assert!(resolution.diagnostics.is_empty());
+            assert_eq!(expect_run(resolution.outcome).args, vec!["add", flag, "react"]);
+        }
+    }
+
+    #[test]
+    fn bun_before_1_4_does_not_support_named_catalog() {
+        let mut options = add_args(&["react"]);
+        options.save_catalog_name = Some("testing".to_string());
+        let resolution = resolve(&bun("1.3.14"), options);
+        expect_unsupported(resolution, &["bun < 1.4 does not support --save-catalog-name."]);
+    }
+
+    #[test]
+    fn bun_1_4_supports_filter_and_catalog() {
+        let mut options = add_args(&["react"]);
+        options.filter = vec!["app".to_string()];
+        options.save_catalog = true;
+        let resolution = resolve(&bun("1.4.0"), options);
         let command = expect_run(resolution.outcome);
 
-        assert_eq!(command.args, vec!["add", "react"]);
-        assert_eq!(
-            resolution.diagnostics.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
-            vec![
-                "bun does not support --save-catalog.",
-                "bun does not support --allow-build.",
-                "bun does not support --filter.",
-                "bun does not support --workspace-root.",
-                "bun does not support --workspace."
-            ]
-        );
+        assert_eq!(command.program, "bun");
+        assert_eq!(command.args, vec!["add", "--filter", "app", "--catalog", "react"]);
+        assert!(resolution.diagnostics.is_empty());
     }
 }

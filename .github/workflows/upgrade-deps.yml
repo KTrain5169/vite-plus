@@ -21,13 +21,13 @@ jobs:
       - name: Set up metadata directory
         run: echo "UPGRADE_DEPS_META_DIR=${RUNNER_TEMP}/upgrade-deps-meta" >> "$GITHUB_ENV"
 
-      - uses: oxc-project/setup-rust@68c3199c5339f965e6e163924c3c450773eba42b # main (pending v1.0.17 — Swatinem/rust-cache v2.9.1 for node24)
+      - uses: ./.github/actions/setup-rust
         with:
           save-cache: ${{ github.ref_name == 'main' }}
           cache-key: upgrade-deps
           tools: just,cargo-shear
 
-      - uses: oxc-project/setup-node@4c588e9266bd930b6ddc34307df0659ed511d187 # v1.3.1
+      - uses: oxc-project/setup-node@1f1a5b4450c8905bd1830c3a908d22b960c4559a # main (Node before pnpm; unreleased)
 
       - name: Capture current upstream CLI help
         run: node .github/scripts/cli-help-diff.ts capture --output "${UPGRADE_DEPS_META_DIR}/cli-help-before.json"
@@ -39,19 +39,12 @@ jobs:
         working-directory: rolldown
         run: rustup target add x86_64-unknown-linux-gnu
 
-      - name: Upgrade dependencies
-        id: upgrade
+      - name: Upgrade dependencies and sync upstream
+        id: build
+        continue-on-error: true # Create PR even if installation or upstream sync fails
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node .github/scripts/upgrade-deps.ts
-
-      - name: Sync remote and build
-        id: build
-        continue-on-error: true # Create PR even if build fails
-        run: |
-          pnpm install --no-frozen-lockfile
-          pnpm tool sync-remote
-          pnpm install --no-frozen-lockfile
 
       - name: Build
         uses: ./.github/actions/build-upstream
@@ -75,53 +68,85 @@ jobs:
             --output "${UPGRADE_DEPS_META_DIR}/cli-help-report.md" \
             --github-output "${GITHUB_OUTPUT}"
 
-      - name: Check upgrade dependencies
+      - name: Check upgrade dependencies with Kimi K3
         id: check-upgrade-dependencies
         timeout-minutes: 180
-        uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
         env:
+          ANTHROPIC_BASE_URL: https://api.kimi.com/coding/
           CLI_HELP_DIFF_CHANGED: ${{ steps.cli-help-diff.outputs.has-changes }}
           CLI_HELP_DIFF_REPORT: ${{ env.UPGRADE_DEPS_META_DIR }}/cli-help-report.md
           RELEASE_BUILD: 'true'
         with:
-          claude_code_oauth_token: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.MOONSHOT_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           show_full_output: 'true'
+          settings: |
+            {
+              "env": {
+                "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/",
+                "ANTHROPIC_MODEL": "k3[1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "k3[1m]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-for-coding",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-for-coding",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "k3[1m]",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "k3[1m]",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1048576",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
+                "CLAUDE_CODE_EFFORT_LEVEL": "max"
+              }
+            }
           prompt: |
             Your goal: after the daily upstream-dependency upgrade, bring the project back
-            to a fully green state. The upgrade script has bumped every dep to the latest
-            version, the `Sync remote and build` step has attempted to merge the rolldown
-            and vite catalogs into the workspace, and the `build-upstream` action has
-            attempted a build — your job is to diagnose and fix every error that surfaced,
-            then prove the fix is complete by running a final validation pass.
+            to a fully green state. The upgrade script has attempted to select the latest
+            supported versions, install dependencies, merge the rolldown and vite catalogs,
+            deduplicate dependencies, and synchronize core's external dependencies.
+            The `build-upstream` action
+            has attempted a build — your job is to diagnose and fix every error that
+            surfaced, then prove the fix is complete by running a final validation pass.
 
             ### Background
             - Upgrade script: `./.github/scripts/upgrade-deps.ts`
+            - Vitest is capped at the latest stable `5.x` release. Keep the exact
+              version selected by the upgrade script when merging upstream catalogs.
+              Official Vitest packages must use that version. Do not bypass the cap.
             - Sync-remote tool: `pnpm tool sync-remote` (source in
               `packages/tools/src/sync-remote-deps.ts`) — clones rolldown/vite into the
               working tree, merges their pnpm-workspace catalogs into the root
               `pnpm-workspace.yaml`, and syncs the root `Cargo.toml` oxc crate
               versions to match `rolldown/Cargo.toml`.
             - Build-upstream action: `./.github/actions/build-upstream/action.yml`
-            - Package manager: `pnpm`. Do NOT downgrade any dep — we want the latest.
+            - Package manager: `pnpm`. Do not downgrade a dependency selected by the
+              upgrade script. Use the latest version that its compatibility policy allows.
+            - After changing tsdown or rolldown-plugin-dts, run
+              `node .github/scripts/upgrade-deps.ts --sync-bundled-deps`, then
+              `pnpm install --no-frozen-lockfile`. Core's external `yuku-parser` must
+              use the exact installed version resolved by the plugin bundled through
+              tsdown, so it stays aligned with the bundled Yuku code. Do not replace
+              this pin with a version range. The sync command also
+              copies Vite's postcss and optional fsevents ranges into core and
+              updates the upgrade metadata. `@oxlint/plugins` shares Oxlint's release
+              version and must use the exact same version selected by the upgrade script.
 
             ### Outcomes from earlier steps (both ran with continue-on-error)
-            - Sync remote and build: ${{ steps.build.outcome }}
+            - Upgrade dependencies and sync upstream: ${{ steps.build.outcome }}
             - build-upstream action: ${{ steps.build-upstream.outcome }}
 
             ### Fixups to perform (in order)
-            1. If the `Sync remote and build` outcome above is `failure`, fix it FIRST —
-               nothing else will work until the merged workspace is correct. Re-run
-               `pnpm tool sync-remote` and read the error. The most common cause is a
+            1. If the `Upgrade dependencies and sync upstream` outcome above is `failure`,
+               fix it FIRST — nothing else will work until the merged workspace is correct.
+               Read the failed command in the upgrade log and re-run it. The most common cause is a
                cross-major semver conflict in the merged catalog, e.g.
                `Incompatible semver ranges for <pkg>: ^X vs ^Y`. The merger refuses to
                auto-resolve cross-major conflicts for packages outside its synced list
-               (oxc-*, vitest deps). For passthrough deps that vp does NOT import
+               (oxc-* and tinybench). For passthrough deps that vp does NOT import
                directly (e.g. `diff`, `acorn`, `astring`, anything only present in
                `rolldown/scripts/package.json` or vite's internals), bump vp's
                `pnpm-workspace.yaml` catalog entry to match the rolldown/vite version,
-               then re-run `pnpm tool sync-remote` until it exits 0. Finish with
-               `pnpm install --no-frozen-lockfile`.
+               then re-run `pnpm tool sync-remote` until it exits 0. Complete the remaining
+               upgrade operations: `pnpm dedupe`,
+               `node .github/scripts/upgrade-deps.ts --sync-bundled-deps`, then
+               `pnpm install --no-frozen-lockfile` before building or testing.
             2. Re-run the steps in `./.github/actions/build-upstream/action.yml`; fix any
                non-zero exits. If the Rust build fails inside a vendored `rolldown`
                crate with an oxc API mismatch (e.g. `oxc_ast::template_element` taking
@@ -203,14 +228,13 @@ jobs:
             Do NOT run `git commit` or `git push`. A later workflow step commits every
             modified file for you.
           claude_args: |
-            --model opus --max-turns 400 --allowedTools "Bash,Edit,Replace,NotebookEditCell"
+            --model "k3[1m]" --max-turns 400 --allowedTools "Bash,Edit,Replace,NotebookEditCell"
           additional_permissions: |
             actions: read
 
       - name: Update lockfile
-        run: |
-          pnpm install --no-frozen-lockfile
-          pnpm dedupe
+        # Dedupe runs in upgrade-deps.ts, before dependency sync and validation.
+        run: pnpm install --no-frozen-lockfile
 
       - name: Format code
         # `pnpm fmt` runs `vp fmt`, which loads the freshly built NAPI binding. When
@@ -221,14 +245,31 @@ jobs:
         continue-on-error: true
         run: pnpm fmt
 
-      - name: Enhance PR description with Claude
+      - name: Enhance PR description with Kimi K3
         id: enhance-pr-description
         continue-on-error: true
-        uses: anthropics/claude-code-action@558b1d6cab4085c7753fe402c10bef0fbb92ac7a # v1.0.165
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        env:
+          ANTHROPIC_BASE_URL: https://api.kimi.com/coding/
         with:
-          claude_code_oauth_token: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.MOONSHOT_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           show_full_output: 'true'
+          settings: |
+            {
+              "env": {
+                "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/",
+                "ANTHROPIC_MODEL": "k3[1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "k3[1m]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-for-coding",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-for-coding",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "k3[1m]",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "k3[1m]",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1048576",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
+                "CLAUDE_CODE_EFFORT_LEVEL": "max"
+              }
+            }
           prompt: |
             Your task is to generate an accurate commit message and PR description for this
             automated upstream-dependency upgrade PR. All output must be written in English.
@@ -237,12 +278,14 @@ jobs:
             - Version changes (old -> new) in JSON: `${{ env.UPGRADE_DEPS_META_DIR }}/versions.json`
             - Baseline commit message: `${{ env.UPGRADE_DEPS_META_DIR }}/commit-message.txt`
             - Baseline PR body: `${{ env.UPGRADE_DEPS_META_DIR }}/pr-body.md`
+            - Read the baseline PR body before you write. Preserve each factual detail unless
+              `git diff` shows that the detail is no longer correct.
             - The working directory is the project root; all upgraded files are staged or modified.
               Use `git status` and `git diff` (including `git diff --stat` and focused per-file diffs)
               to discover what actually changed beyond the raw version bumps.
 
             ### Build outcomes from earlier steps
-            - Sync remote and build: ${{ steps.build.outcome }}
+            - Upgrade dependencies and sync upstream: ${{ steps.build.outcome }}
             - build-upstream action: ${{ steps.build-upstream.outcome }}
 
             ### Output files to OVERWRITE (these live outside the repo and will NOT be committed)
@@ -261,18 +304,25 @@ jobs:
               add a trailing `Code changes:` block listing each change with a file path.
 
             ### PR body format (Markdown)
-            Use these sections in order:
-            1. `## Summary` — 2-4 bullets describing what this PR does at a high level,
-               naming the most impactful upgrades (e.g., rolldown tag bump, vite bump,
-               vitest/tsdown bumps) and any required code adjustments.
+            Use this content in order:
+            1. Add 2-4 overview bullets without a `Summary` heading. Describe the most impactful
+               upgrades and all required code adjustments.
             2. `## Dependency updates` — a Markdown table with columns `Package | From | To`.
-               Use short 7-char SHAs for rolldown/vite hashes, and include the tag in the `To`
-               column when available. Omit packages whose old and new values are equal.
+               Link each target version to its changelog when a verified link is available.
+               Format the target version as inline code inside the Markdown link.
+               - Prefer an exact target-version release page in the official repository.
+               - If no release page exists, link to the target version in the official changelog.
+               - Use `gh api`, npm package metadata, and upstream repository files to verify links.
+               - Do not guess a URL. Keep the target version unlinked if you cannot verify a link.
+               Include the version and a short 7-char SHA in both `From` and `To` for `rolldown`
+               and `vite`. Link each SHA label to the full commit in the official repository.
+               Omit packages whose old and new values are equal.
+               Keep the baseline list of unchanged dependencies after the table.
             3. `## Code changes` — bullet list of the actual non-version edits, each naming
                the file(s) touched. If the only changes are version bumps + lockfile + generated
                bindings, write `- None beyond version bumps, lockfile, and formatter output.`.
             4. `## Build status` — bullet list:
-               - `sync-remote-and-build`: ${{ steps.build.outcome }}
+               - `upgrade-and-sync`: ${{ steps.build.outcome }}
                - `build-upstream`: ${{ steps.build-upstream.outcome }}
 
             ### Rules
@@ -284,7 +334,7 @@ jobs:
               two output files. A later workflow step will consume them.
             - Do NOT modify any file inside the repository working tree.
           claude_args: |
-            --model opus --allowedTools "Bash,Read,Write,Edit"
+            --model "k3[1m]" --allowedTools "Bash,Read,Write,Edit"
           additional_permissions: |
             actions: read
 
@@ -326,6 +376,8 @@ jobs:
         with:
           client-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Close and delete previous PR
         env:

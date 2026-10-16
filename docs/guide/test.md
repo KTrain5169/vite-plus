@@ -2,6 +2,10 @@
 
 `vp test` runs tests with [Vitest](https://vitest.dev).
 
+Vite+ depends on Vitest `5.0.5`, which requires Node `^22.18.0 || ^24.11.0 || >=26.0.0`. For existing projects, follow [Upgrade to Vitest 5](./vitest-v5.md) before updating dependencies.
+
+`vp test` resolves Vitest from `vite-plus`'s dependencies first, then from your project.
+
 ## Overview
 
 `vp test` is built on [Vitest](https://vitest.dev/), so you get a Vite-native test runner that reuses your Vite config and plugins, supports Jest-style expectations, snapshots, and coverage, and handles modern ESM, TypeScript, and JSX projects cleanly.

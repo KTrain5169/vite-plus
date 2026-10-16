@@ -6,6 +6,14 @@ Because `vite.config.ts` is just JavaScript, you can choose to put your entire c
 
 ## Root Config With Overrides
 
+Run `vp lint`, `vp fmt`, and `vp check` from the workspace root to apply the root lint and format settings across packages. These commands do not apply nested configs to individual files. Define file- or package-specific settings with overrides in the root `vite.config.ts`.
+
+When run from a package directory, `vp lint` and `vp fmt` still use the root settings unless the package config defines its own `lint` or `fmt` block. We do not recommend package-level blocks; use overrides in the root config instead. File arguments remain relative to the package working directory.
+
+`vp check` uses the root `lint` and `fmt` blocks when they exist. Package configs cannot replace root format settings, lint rules, or type-check options in `vp check`.
+
+Use `-c <path>` or `--config <path>` with `vp lint` or `vp fmt` to select another config explicitly.
+
 Use `lint.overrides` for Oxlint rules that only apply to some packages:
 
 ```ts [vite.config.ts]

@@ -1,6 +1,6 @@
 #![allow(clippy::allow_attributes, clippy::disallowed_types)]
 
-use std::{ffi::OsString, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use thiserror::Error;
 use vt_path::{AbsolutePath, AbsolutePathBuf, relative::FromPathError};
@@ -24,17 +24,6 @@ pub enum Error {
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
 
-    #[error("Env value is not valid unicode: {key} = {value:?}")]
-    EnvValueIsNotValidUnicode { key: Str, value: OsString },
-
-    #[cfg(unix)]
-    #[error("Unsupported file type: {0:?}")]
-    UnsupportedFileType(nix::dir::Type),
-
-    #[cfg(windows)]
-    #[error("Unsupported file type: {0:?}")]
-    UnsupportedFileType(std::fs::FileType),
-
     #[error(transparent)]
     Utf8Error(#[from] bstr::Utf8Error),
 
@@ -44,27 +33,6 @@ pub enum Error {
 
     #[error(transparent)]
     WorkspaceError(#[from] vt_workspace::Error),
-
-    #[error("Lint failed, reason: {reason}")]
-    LintFailed { status: Str, reason: Str },
-
-    #[error("Fmt failed")]
-    FmtFailed { status: Str, reason: Str },
-
-    #[error("Vite failed")]
-    Vite { status: Str, reason: Str },
-
-    #[error("Test failed")]
-    TestFailed { status: Str, reason: Str },
-
-    #[error("Lib failed")]
-    LibFailed { status: Str, reason: Str },
-
-    #[error("Doc failed, reason: {reason}")]
-    DocFailed { status: Str, reason: Str },
-
-    #[error("Resolve universal vite config failed")]
-    ResolveUniversalViteConfigFailed { status: Str, reason: Str },
 
     #[error("The path ({}) is not a valid relative path because: {reason}", .path.display())]
     InvalidRelativePath { path: Box<Path>, reason: FromPathError },
@@ -105,9 +73,6 @@ pub enum Error {
 
     #[error(transparent)]
     JoinError(#[from] tokio::task::JoinError),
-
-    #[error("User cancelled by Ctrl+C")]
-    UserCancelled,
 
     #[error("Hash mismatch: expected {expected}, got {actual}")]
     HashMismatch { expected: Str, actual: Str },
@@ -153,9 +118,9 @@ impl Error {
 
 /// Details of a failed `packageManager` integrity check.
 ///
-/// `basis` names the artifact that vp hashed. Corepack hashes the extracted CLI
-/// for Yarn 2+, and the npm tarball for every other package manager. A message
-/// that says only "hash mismatch" reads like a corrupt download.
+/// `basis` names the artifact that vp hashed: the extracted CLI for Yarn 2+ or
+/// the npm package tarball for npm, pnpm, and Yarn Classic. Naming the artifact
+/// distinguishes a wrong hash basis from a corrupt download.
 #[derive(Error, Debug)]
 #[error(
     "Hash mismatch for {name}@{version}: expected {expected}, got {actual}\n\

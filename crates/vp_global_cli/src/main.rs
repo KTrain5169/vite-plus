@@ -9,8 +9,7 @@
     clippy::disallowed_macros,
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    clippy::print_stderr,
-    clippy::print_stdout
+    clippy::print_stderr
 )]
 
 mod cli;
@@ -18,7 +17,9 @@ mod command_picker;
 mod commands;
 mod error;
 mod help;
+mod homebrew;
 mod js_executor;
+mod self_setup;
 mod shim;
 mod upgrade_check;
 
@@ -30,7 +31,7 @@ use std::{
 
 use clap::error::{ContextKind, ContextValue};
 use clap_complete::env::CompleteEnv;
-use owo_colors::OwoColorize;
+use console::style;
 use vp_shared::{exit_code_from_status, output};
 
 pub use crate::cli::try_parse_args_from;
@@ -177,13 +178,15 @@ fn extract_invalid_subcommand_details(error: &clap::Error) -> Option<InvalidSubc
 fn print_invalid_subcommand_error(details: &InvalidSubcommandDetails) {
     vp_shared::header::print_header();
 
-    let highlighted_subcommand = details.invalid_subcommand.bright_blue().to_string();
+    let highlighted_subcommand =
+        style(&details.invalid_subcommand).for_stderr().blue().bright().to_string();
     output::error(&format!("Command '{highlighted_subcommand}' not found"));
 }
 
 fn print_nested_suggestion(suggestion: &str) {
     eprintln!();
-    let highlighted_suggestion = format!("`vp {suggestion}`").bright_blue().to_string();
+    let highlighted_suggestion =
+        style(format!("`vp {suggestion}`")).for_stderr().blue().bright().to_string();
     eprintln!("Did you mean {highlighted_suggestion}?");
 }
 
@@ -215,7 +218,8 @@ fn prompt_to_run_suggested_command(suggestion: &str) -> bool {
     }
 
     eprintln!();
-    let highlighted_suggestion = format!("`vp {suggestion}`").bright_blue().to_string();
+    let highlighted_suggestion =
+        style(format!("`vp {suggestion}`")).for_stderr().blue().bright().to_string();
     eprint!("Do you want to run {highlighted_suggestion}? (y/N): ");
     if std::io::stderr().flush().is_err() {
         return false;
@@ -260,7 +264,11 @@ fn clap_error_to_exit_code(e: &clap::Error) -> ExitCode {
     ExitCode::from(e.exit_code() as u8)
 }
 
-async fn run_corrected_args(cwd: &vt_path::AbsolutePathBuf, raw_args: &[String]) -> ExitCode {
+async fn run_corrected_args(
+    cwd: &vt_path::AbsolutePathBuf,
+    raw_args: &[String],
+    explicit_chdir: bool,
+) -> ExitCode {
     let render_options = RenderOptions { show_header: false };
     let args_with_program: Vec<String> =
         std::iter::once("vp".to_string()).chain(raw_args.iter().cloned()).collect();
@@ -275,8 +283,14 @@ async fn run_corrected_args(cwd: &vt_path::AbsolutePathBuf, raw_args: &[String])
         }
     };
 
-    match run_command_with_options(cwd.clone(), parsed, render_options, raw_subcommand.as_deref())
-        .await
+    match run_command_with_options(
+        cwd.clone(),
+        parsed,
+        render_options,
+        raw_subcommand.as_deref(),
+        explicit_chdir,
+    )
+    .await
     {
         Ok(exit_status) => exit_status_to_exit_code(exit_status),
         Err(e) => {
@@ -322,32 +336,101 @@ fn print_unknown_argument_error(error: &clap::Error) -> bool {
 
     vp_shared::header::print_header();
 
-    let highlighted_argument = invalid_argument.bright_blue().to_string();
+    let highlighted_argument = style(&invalid_argument).for_stderr().blue().bright().to_string();
     output::error(&format!("Unexpected argument '{highlighted_argument}'"));
 
     if has_pass_as_value_suggestion(error) {
         eprintln!();
         let pass_through_argument = format!("-- {invalid_argument}");
         let highlighted_pass_through_argument =
-            format!("`{}`", pass_through_argument.bright_blue());
+            format!("`{}`", style(&pass_through_argument).for_stderr().blue().bright());
         eprintln!("Use {highlighted_pass_through_argument} to pass the argument as a value");
     }
 
     true
 }
 
+fn dump_dirs_from_env_config() -> bool {
+    if env::var_os(vp_shared::env_vars::VP_DUMP_DIRS).as_deref() != Some(std::ffi::OsStr::new("1"))
+    {
+        return false;
+    }
+    use vp_shared::env_vars::dump_dirs;
+    let dirs = &vp_shared::EnvConfig::get().dirs;
+    vp_shared::output::print_stdout_line(format_args!(
+        "{}\t{}",
+        dump_dirs::LAYOUT,
+        dirs.layout().as_str()
+    ));
+    vp_shared::output::print_stdout_line(format_args!(
+        "{}\t{}",
+        dump_dirs::DATA,
+        dirs.data.as_path().display()
+    ));
+    vp_shared::output::print_stdout_line(format_args!(
+        "{}\t{}",
+        dump_dirs::BIN,
+        dirs.bin.as_path().display()
+    ));
+    vp_shared::output::print_stdout_line(format_args!(
+        "{}\t{}",
+        dump_dirs::CACHE,
+        dirs.cache.as_path().display()
+    ));
+    vp_shared::output::print_stdout_line(format_args!(
+        "{}\t{}",
+        dump_dirs::CONFIG,
+        dirs.config.as_path().display()
+    ));
+    vp_shared::output::print_stdout_line(format_args!(
+        "{}\t{}",
+        dump_dirs::STATE,
+        dirs.state.as_path().display()
+    ));
+    true
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Probe before tracing, directory resolution, or argument dispatch can emit output.
+    if env::var_os(vp_shared::env_vars::VP_SELF_SETUP_SUPPORT_CHECK).is_some() {
+        vp_shared::output::print_stdout_line(format_args!("vite-plus-self-setup-v1"));
+        return ExitCode::SUCCESS;
+    }
+
+    #[cfg(windows)]
+    if let Some(code) = commands::implode::maybe_run_deferred_delete_helper(std::env::args_os()) {
+        return ExitCode::from(code);
+    }
+
     vp_shared::ensure_blocking_stdio();
+    vp_shared::ensure_windows_pathext();
 
     // Initialize tracing
     vp_shared::init_tracing();
+
+    // Internal directory queries are also used by the local installer before deployment.
+    if dump_dirs_from_env_config() {
+        return ExitCode::SUCCESS;
+    }
+
+    match self_setup::maybe_run().await {
+        Ok(Some(code)) => return code,
+        Ok(None) => {}
+        Err(error) => {
+            output::error(&error.to_string());
+            return ExitCode::FAILURE;
+        }
+    }
 
     let mut args: Vec<String> = std::env::args().collect();
 
     // Replace bash completion script to fix completion for items containing ':'
     if env::var_os("VP_COMPLETE").is_some_and(|shell| shell == "bash") && args.len() == 1 {
-        print!("{}", include_str!("../completion-register.bash"));
+        vp_shared::output::print_stdout(format_args!(
+            "{}",
+            include_str!("../completion-register.bash")
+        ));
         return ExitCode::SUCCESS;
     }
 
@@ -372,7 +455,7 @@ async fn main() -> ExitCode {
         // Shim mode - dispatch to the appropriate tool. stdout belongs to the
         // wrapped tool; route vp's own output to stderr.
         output::route_user_output_to_stderr();
-        let exit_code = shim::dispatch(&tool, &args[1..]).await;
+        let exit_code = shim::dispatch(&tool, &args[1..], vp_shared::ToolPathEnv::from_env()).await;
         return ExitCode::from(exit_code as u8);
     }
 
@@ -390,7 +473,9 @@ async fn main() -> ExitCode {
     // behave exactly as if vp had been started in <dir>. Setting the process
     // cwd (before any command logic runs) keeps `vt_path::current_dir()`
     // callers deep inside command implementations equivalent to the cd form.
+    let mut explicit_chdir = false;
     if let Some((dir, consumed)) = parse_leading_chdir(&args[1..]) {
+        explicit_chdir = true;
         cwd = match apply_chdir(&cwd, &dir) {
             Ok(target) => target,
             Err(message) => {
@@ -436,13 +521,10 @@ async fn main() -> ExitCode {
     // Parse CLI arguments (using custom help formatting)
     let parse_result = try_parse_args_from(normalized_args);
 
-    // Spawn background upgrade check for eligible commands
-    let upgrade_handle = match &parse_result {
-        Ok(args) if upgrade_check::should_run_for_command(args) => {
-            Some(tokio::spawn(upgrade_check::check_for_update()))
-        }
-        _ => None,
-    };
+    let should_run_upgrade_check =
+        parse_result.as_ref().is_ok_and(upgrade_check::should_run_for_command);
+    let spawned_upgrade_check =
+        should_run_upgrade_check && upgrade_check::spawn_background_check_if_needed();
 
     let exit_code = match parse_result {
         Err(e) => {
@@ -468,7 +550,7 @@ async fn main() -> ExitCode {
                     if let Some(corrected_raw_args) = corrected_top_level_args {
                         let suggestion = details.suggestion.as_ref().expect("suggestion exists");
                         if prompt_to_run_suggested_command(suggestion) {
-                            run_corrected_args(&cwd, &corrected_raw_args).await
+                            run_corrected_args(&cwd, &corrected_raw_args, explicit_chdir).await
                         } else {
                             clap_error_to_exit_code(&e)
                         }
@@ -497,25 +579,24 @@ async fn main() -> ExitCode {
                 clap_error_to_exit_code(&e)
             }
         }
-        Ok(args) => match run_command(cwd.clone(), args, raw_subcommand.as_deref()).await {
-            Ok(exit_status) => exit_status_to_exit_code(exit_status),
-            Err(e) => {
-                if e.is_user_message() {
-                    output::raw_stderr(&format!("{e}"));
-                } else {
-                    output::error(&format!("{e}"));
+        Ok(args) => {
+            match run_command(cwd.clone(), args, raw_subcommand.as_deref(), explicit_chdir).await {
+                Ok(exit_status) => exit_status_to_exit_code(exit_status),
+                Err(e) => {
+                    if e.is_user_message() {
+                        output::raw_stderr(&format!("{e}"));
+                    } else {
+                        output::error(&format!("{e}"));
+                    }
+                    ExitCode::FAILURE
                 }
-                ExitCode::FAILURE
             }
-        },
+        }
     };
 
-    // Display upgrade notice if a newer version is available
-    if let Some(handle) = upgrade_handle
-        && let Ok(Ok(Some(result))) =
-            tokio::time::timeout(std::time::Duration::from_millis(500), handle).await
-    {
-        upgrade_check::display_upgrade_notice(&result);
+    // A command never consumes a notice produced by the helper it just spawned.
+    if should_run_upgrade_check && !spawned_upgrade_check {
+        upgrade_check::display_cached_upgrade_notice();
     }
 
     exit_code

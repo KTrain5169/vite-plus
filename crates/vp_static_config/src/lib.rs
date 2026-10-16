@@ -148,7 +148,7 @@ fn parse_js_ts_config(source: &str, extension: &str) -> FieldMap {
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    if result.panicked || !result.diagnostics.is_empty() {
+    if result.fatal_error || !result.diagnostics.is_empty() {
         return FieldMap::unanalyzable();
     }
 
@@ -1321,6 +1321,19 @@ mod tests {
     // ── Not analyzable cases ─────────────────────────────────────────────
 
     #[test]
+    fn syntax_errors_require_runtime_evaluation() {
+        for source in [
+            "export default { run: { cache: true }",
+            "export default { run: { cache: true } }; const missing;",
+        ] {
+            let result = parse(source);
+            assert_non_static(&result, "run");
+            assert_non_static(&result, "defaultPackage");
+            assert_eq!(result.get_declared("run"), None);
+        }
+    }
+
+    #[test]
     fn returns_none_for_no_default_export() {
         assert_non_static(&parse_js_ts_config("export const config = { a: 1 };", "ts"), "run");
     }
@@ -1358,8 +1371,9 @@ mod tests {
                     tasks: {
                         hello: {
                             command: 'node hello.mjs',
-                            envs: ['FOO', 'BAR'],
-                            cache: true,
+                            cache: {
+                                env: ['FOO', 'BAR'],
+                            },
                         },
                     },
                 },
@@ -1372,8 +1386,9 @@ mod tests {
                 "tasks": {
                     "hello": {
                         "command": "node hello.mjs",
-                        "envs": ["FOO", "BAR"],
-                        "cache": true,
+                        "cache": {
+                            "env": ["FOO", "BAR"],
+                        },
                     }
                 }
             }),

@@ -9,6 +9,7 @@ import {
   hasConfigKey,
   mergeJsonConfig,
   mergeTsdownConfig,
+  migrateTaskCacheConfig,
   rewriteImportsInDirectory,
   rewriteScripts,
   wrapLazyPlugins,
@@ -19,6 +20,7 @@ import {
 } from '../../oxlint-plugin-config.ts';
 import { type WorkspacePackage } from '../../types/index.ts';
 import { BASEURL_TSCONFIG_WARNING, VITE_PLUS_NAME } from '../../utils/constants.ts';
+import { documentationUrl } from '../../utils/documentation.ts';
 import { editJsonFile, isJsonFile, readJsonFile, writeJsonFile } from '../../utils/json.ts';
 import { displayRelative } from '../../utils/path.ts';
 import { hasBaseUrlInTsconfig } from '../../utils/tsconfig.ts';
@@ -129,7 +131,7 @@ export function rewriteLintStagedConfigFile(projectPath: string, report?: Migrat
   }
   if (hasUnsupported) {
     infoMigration(
-      'Only "staged" in vite.config.ts is supported. See https://viteplus.dev/guide/migrate#lint-staged',
+      `Only "staged" in vite.config.ts is supported. See ${documentationUrl('/guide/migrate#lint-staged')}`,
       report,
     );
   }
@@ -174,11 +176,12 @@ export function mergeTsdownConfigFile(
   projectPath: string,
   silent = false,
   report?: MigrationReport,
-): void {
+): boolean {
   const configs = detectConfigs(projectPath);
   if (!configs.tsdownConfig) {
-    return;
+    return false;
   }
+  const createdViteConfig = !configs.viteConfig;
   const viteConfig = ensureViteConfig(projectPath, configs, silent, report);
 
   const fullViteConfigPath = path.join(projectPath, viteConfig);
@@ -187,11 +190,34 @@ export function mergeTsdownConfigFile(
   // For JSON files, merge content directly and delete the file
   if (configs.tsdownConfig.endsWith('.json')) {
     mergeAndRemoveJsonConfig(projectPath, viteConfig, configs.tsdownConfig, 'pack', silent, report);
-    return;
+    return createdViteConfig || !fs.existsSync(fullTsdownConfigPath);
   }
 
   // For TS/JS files, import the config file
   const tsdownRelativePath = `./${configs.tsdownConfig}`;
+  // Do not prepend a second `pack` key when the config is already wired under
+  // a different local import name. If a pack config exists but does not import
+  // this tsdown config, leave both files untouched and keep the manual follow-up.
+  if (hasConfigKey(fullViteConfigPath, 'pack')) {
+    const viteConfigContent = fs.readFileSync(fullViteConfigPath, 'utf8');
+    const runtimeImportPath = tsdownRelativePath
+      .replace(/\.mts$/, '.mjs')
+      .replace(/\.cts$/, '.cjs')
+      .replace(/\.ts$/, '.js');
+    const importsTsdownConfig = [tsdownRelativePath, runtimeImportPath].some(
+      (importPath) =>
+        viteConfigContent.includes(`from '${importPath}'`) ||
+        viteConfigContent.includes(`from "${importPath}"`),
+    );
+    if (!importsTsdownConfig) {
+      infoMigration(
+        `Please manually merge ${displayRelative(fullTsdownConfigPath)} into ${displayRelative(fullViteConfigPath)}, see ${documentationUrl('/guide/migrate#tsdown')}`,
+        report,
+      );
+    }
+    return false;
+  }
+
   const result = mergeTsdownConfig(fullViteConfigPath, tsdownRelativePath);
   if (result.updated) {
     fs.writeFileSync(fullViteConfigPath, result.content);
@@ -206,9 +232,10 @@ export function mergeTsdownConfigFile(
   }
   // Show documentation link for manual merging since we only added the import
   infoMigration(
-    `Please manually merge ${displayRelative(fullTsdownConfigPath)} into ${displayRelative(fullViteConfigPath)}, see https://viteplus.dev/guide/migrate#tsdown`,
+    `Please manually merge ${displayRelative(fullTsdownConfigPath)} into ${displayRelative(fullViteConfigPath)}, see ${documentationUrl('/guide/migrate#tsdown')}`,
     report,
   );
+  return createdViteConfig || result.updated;
 }
 
 /**
@@ -415,7 +442,7 @@ function mergeAndRemoveJsonConfig(
       report,
     );
     infoMigration(
-      'Please complete the merge manually and follow the instructions in the documentation: https://viteplus.dev/config/',
+      `Please complete the merge manually and follow the instructions in the documentation: ${documentationUrl('/config/')}`,
       report,
     );
   }
@@ -461,7 +488,7 @@ export function mergeStagedConfigToViteConfig(
       report,
     );
     infoMigration(
-      `Please add staged config to ${displayRelative(fullViteConfigPath)} manually, see https://viteplus.dev/guide/migrate#lint-staged`,
+      `Please add staged config to ${displayRelative(fullViteConfigPath)} manually, see ${documentationUrl('/guide/migrate#lint-staged')}`,
       report,
     );
     return false;
@@ -513,6 +540,52 @@ export function wrapLazyPluginsInViteConfig(
 }
 
 /**
+ * Move `env`, `untrackedEnv`, `input`, and `output` from the top level of
+ * each `run.tasks` entry into its `cache` object, as Vite Task requires.
+ * Tasks that need manual changes are warned about, or collected into
+ * `manualWarnings` when the caller reports them later.
+ */
+export function migrateTaskCacheConfigInViteConfig(
+  projectPath: string,
+  silent = false,
+  report?: MigrationReport,
+  manualWarnings?: string[],
+): boolean {
+  const configs = detectConfigs(projectPath);
+  if (!configs.viteConfig) {
+    return false;
+  }
+
+  const viteConfigPath = path.join(projectPath, configs.viteConfig);
+  const result = migrateTaskCacheConfig(viteConfigPath);
+  if (result.manualTasks.length > 0) {
+    const tasks = result.manualTasks.map((task) => `\`${task}\``).join(', ');
+    const warning = `${displayRelative(viteConfigPath)}: Move \`env\`, \`untrackedEnv\`, \`input\`, and \`output\` under \`cache\` manually in ${
+      result.manualTasks.length === 1 ? 'task' : 'tasks'
+    } ${tasks}; ${result.manualTasks.length === 1 ? 'it was' : 'they were'} left unchanged. See ${documentationUrl('/config/run#cache')}`;
+    if (manualWarnings) {
+      manualWarnings.push(warning);
+    } else {
+      warnMigration(warning, report);
+    }
+  }
+  if (!result.updated) {
+    return false;
+  }
+
+  fs.writeFileSync(viteConfigPath, result.content);
+  if (report) {
+    report.migratedTaskCacheConfigCount++;
+  }
+  if (!silent) {
+    prompts.log.success(
+      `✔ Moved task cache settings under \`cache\` in ${displayRelative(viteConfigPath)}`,
+    );
+  }
+  return true;
+}
+
+/**
  * Rewrite imports in all TypeScript/JavaScript files under a directory
  * This rewrites vite/vitest imports to @voidzero-dev/vite-plus
  * @param projectPath - The root directory to search for files
@@ -522,11 +595,19 @@ export function rewriteAllImports(
   silent = false,
   report?: MigrationReport,
   preserveNuxtVitestImports = true,
+  // Directories of packages that own the Oxlint plugin API, captured before
+  // `rewritePackageJson` stripped `oxlint` from their manifests. See
+  // `collectOxlintOwnerDirs`.
+  oxlintOwnerDirs: string[] = [],
 ): boolean {
-  const result = rewriteImportsInDirectory(projectPath, preserveNuxtVitestImports);
+  const result = rewriteImportsInDirectory(projectPath, preserveNuxtVitestImports, oxlintOwnerDirs);
   const modified = result.modifiedFiles.length;
   const preserved = result.preservedVitestFiles.length;
   const errors = result.errors.length;
+
+  for (const warning of result.warnings) {
+    warnMigration(`${displayRelative(warning.path)}: ${warning.message}`, report);
+  }
 
   if (report) {
     report.rewrittenImportFileCount += modified;

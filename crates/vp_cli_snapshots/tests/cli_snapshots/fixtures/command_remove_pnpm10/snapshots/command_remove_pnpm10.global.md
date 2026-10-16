@@ -26,7 +26,7 @@ Options:
   --dry-run             Preview what would be removed without actually removing (only with -g)
   -h, --help            Print help
 
-Documentation: https://viteplus.dev/guide/install
+Documentation: https://viteplus.dev/guide/package-management
 ```
 
 ## `vp remove`
@@ -116,10 +116,10 @@ Packages: -2
 --
 
 dependencies:
-- testnpm2 1.0.1
+- testnpm2
 
 devDependencies:
-- test-vite-plus-install 1.0.0
+- test-vite-plus-install
 
 Done in <duration> using pnpm <version>
 ```

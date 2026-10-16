@@ -65,13 +65,18 @@ jobs:
       id-token: write # Required for OIDC
     env:
       VERSION: ${{ needs.check.outputs.version }}
+      # npm publish-time scanning makes a successful upload temporarily
+      # unavailable to installs. After each dependency tier becomes visible on
+      # this runner's registry edge, allow time for other CDN edges to settle.
+      PUBLISH_PROPAGATION_MIN_SECONDS: '60'
+      PUBLISH_PROPAGATION_TIMEOUT_SECONDS: '600'
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
 
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.18.0'
           package-manager-cache: false
@@ -81,34 +86,40 @@ jobs:
         run: pnpm install
 
       - name: Download cli dist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages/cli/dist
           pattern: cli
           merge-multiple: true
 
       - name: Download cli docs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages/cli/docs
           pattern: cli-docs
           merge-multiple: true
 
       - name: Download cli binding
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages/cli/artifacts
           pattern: vite-plus-native-*
 
       - name: Download core dist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages/core/dist
           pattern: core
           merge-multiple: true
 
+      - name: Download prompts dist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prompts
+          path: packages/prompts/dist
+
       - name: Download LICENSE files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages
           pattern: licenses
@@ -121,13 +132,13 @@ jobs:
           upload: 'false'
 
       - name: Download Rust CLI binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: rust-cli-artifacts
           pattern: vp-global-cli-*
 
       - name: Download installer binaries (Windows)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: installer-artifacts
           pattern: vp-setup-*
@@ -146,19 +157,62 @@ jobs:
           ls -la installer-release/ || echo "No installer binaries found"
 
       - name: Download release archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: binary-release
           pattern: vp-release-archive-*
           merge-multiple: true
 
+      - name: Create release archive checksums
+        working-directory: binary-release
+        run: sha256sum vp-* > vp-checksums.txt
+
       - name: Prepare and publish native addons
         run: node ./packages/cli/publish-native-addons.ts --mode npm
 
-      - name: Publish
-        run: |
+      - name: Publish prompts
+        run: >-
+          node ./.github/scripts/publish-npm-package.ts
+          "@voidzero-dev/vite-plus-prompts@${VERSION}"
+          --
+          pnpm publish --filter=./packages/prompts --tag latest --access public --no-git-checks
+
+      - name: Publish core dependency tier
+        run: >-
+          node ./.github/scripts/publish-npm-package.ts
+          "@voidzero-dev/vite-plus-core@${VERSION}"
+          --
           pnpm publish --filter=./packages/core --tag latest --access public --no-git-checks
+
+      # The CLI pins core via workspace:* (rewritten to this exact version).
+      # Wait for both its install metadata and tarball before publishing the CLI.
+      - name: Wait for core to propagate
+        run: >-
+          node ./.github/scripts/wait-for-npm-packages.ts
+          "@voidzero-dev/vite-plus-core@${VERSION}"
+
+      - name: Publish Vite+
+        run: >-
+          node ./.github/scripts/publish-npm-package.ts
+          "vite-plus@${VERSION}"
+          --
           pnpm publish --filter=./packages/cli --tag latest --access public --no-git-checks
+
+      # Downstream jobs build Docker images by installing this release from npm.
+      - name: Wait for published packages to propagate
+        run: >-
+          node ./.github/scripts/wait-for-npm-packages.ts
+          "vite-plus@${VERSION}"
+          "@voidzero-dev/vite-plus-prompts@${VERSION}"
+
+      # create-vite-plus pins vite-plus via workspace:* (rewritten to this exact
+      # version), so it publishes only after vite-plus is installable.
+      - name: Publish create-vite-plus
+        run: >-
+          node ./.github/scripts/publish-npm-package.ts
+          "create-vite-plus@${VERSION}"
+          --
+          pnpm publish --filter=./packages/create-vite-plus --tag latest --access public --no-git-checks
 
       - name: Create release body
         env:
@@ -174,6 +228,7 @@ jobs:
 
           - \`@voidzero-dev/vite-plus-core@${VERSION}\`
           - \`vite-plus@${VERSION}\`
+          - \`create-vite-plus@${VERSION}\`
 
           ### Installation
 
@@ -193,7 +248,7 @@ jobs:
           EOF
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         id: release
         with:
           body_path: ./RELEASE_BODY.md
@@ -207,6 +262,7 @@ jobs:
             installer-release/vp-setup-*.exe
             binary-release/vp-*.tar.gz
             binary-release/vp-*.zip
+            binary-release/vp-checksums.txt
 
       - name: Publish GitHub Release
         env:
@@ -233,6 +289,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      id-token: write # authenticate remote cache uploads
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
@@ -258,12 +315,12 @@ jobs:
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -282,7 +339,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: docker
           file: docker/Dockerfile
@@ -328,6 +385,7 @@ jobs:
             **Published Packages:**
             • @voidzero-dev/vite-plus-core@${{ env.VERSION }}
             • vite-plus@${{ env.VERSION }}
+            • create-vite-plus@${{ env.VERSION }}
 
             **Docker (GHCR):**
             • `docker pull ${{ env.IMAGE }}:${{ env.VERSION }}`

@@ -7,7 +7,7 @@ migration should work with bun object-form workspaces
 ```
 VITE+ - The Unified Toolchain for the Web
 
-✔ Merged .oxlintrc.json into vite.config.ts
+◆ ✔ Merged .oxlintrc.json into vite.config.ts
 ◇ Migrated . to Vite+ <version>
 • Node <version>  bun <version>
 • 2 config updates applied, 1 file had imports rewritten
@@ -42,6 +42,13 @@ export default defineConfig({
         "specifier": "vite-plus/oxlint-plugin"
       }
     ]
+  },
+  test: {
+    // Vitest v4 compatibility: preserve mock call history.
+    // Remove after tests no longer rely on calls from setup or earlier tests.
+    // https://viteplus.dev/guide/vitest-v5#remove-unneeded-compatibility-settings
+    // https://vitest.dev/guide/migration/#clearmocks-is-enabled-by-default
+    clearMocks: false
   },
   plugins: lazyPlugins(() => [react()]),
 });

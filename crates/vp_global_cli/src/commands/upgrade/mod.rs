@@ -5,13 +5,13 @@
 
 use std::process::ExitStatus;
 
-use owo_colors::OwoColorize;
+use console::style;
 use vp_pm_cli::HttpClient;
 use vp_setup::{install, integrity, platform, registry};
 use vp_shared::output;
 use vt_path::AbsolutePathBuf;
 
-use crate::{commands::env::config::get_vp_home, error::Error};
+use crate::error::Error;
 
 /// Options for the upgrade command.
 pub struct UpgradeOptions {
@@ -29,16 +29,38 @@ pub struct UpgradeOptions {
     pub silent: bool,
     /// Custom npm registry URL
     pub registry: Option<String>,
+    /// Refresh cached update status in a background helper
+    pub background_check: bool,
 }
 
 /// Execute the upgrade command.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[allow(clippy::print_stderr)]
 pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
-    let install_dir = get_vp_home()?;
+    if options.background_check {
+        crate::upgrade_check::run_background_check().await;
+        return Ok(ExitStatus::default());
+    }
+
+    if crate::homebrew::owns_current_exe() {
+        if options.check && !options.rollback {
+            if !options.silent {
+                output::info(
+                    "Homebrew manages this installation. Run `brew outdated vite-plus` to check for updates.",
+                );
+            }
+            return Ok(ExitStatus::default());
+        }
+        return Err(Error::Upgrade(
+            "Homebrew manages this installation. Run `brew upgrade vite-plus` to update it.".into(),
+        ));
+    }
+
+    let config = vp_shared::EnvConfig::get();
+    let install_dir = &config.dirs.data;
 
     // Handle --rollback
     if options.rollback {
-        return execute_rollback(&install_dir, options.silent).await;
+        return execute_rollback(install_dir, options.silent).await;
     }
 
     // Step 1: Detect platform
@@ -69,10 +91,17 @@ pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
     // Step 4: Handle --check (report and exit)
     if options.check {
         if resolved.version == current_version {
-            println!("\n{} Already up to date ({})", output::CHECK.green(), current_version);
+            vp_shared::output::print_stdout_line(format_args!(
+                "\n{} Already up to date ({})",
+                style(output::CHECK).green(),
+                current_version
+            ));
         } else {
-            println!("Update available: {} \u{2192} {}", current_version, resolved.version);
-            println!("Run `vp upgrade` to update.");
+            vp_shared::output::print_stdout_line(format_args!(
+                "Update available: {} \u{2192} {}",
+                current_version, resolved.version
+            ));
+            vp_shared::output::print_stdout_line(format_args!("Run `vp upgrade` to update."));
         }
         return Ok(ExitStatus::default());
     }
@@ -80,9 +109,32 @@ pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
     // Step 5: Handle already up-to-date
     if resolved.version == current_version && !options.force {
         if !options.silent {
-            println!("\n{} Already up to date ({})", output::CHECK.green(), current_version);
+            vp_shared::output::print_stdout_line(format_args!(
+                "\n{} Already up to date ({})",
+                style(output::CHECK).green(),
+                current_version
+            ));
         }
         return Ok(ExitStatus::default());
+    }
+
+    // Step 6: Reject a target that cannot use the current layout.
+    //
+    // A pre-split payload resolves each path from VP_HOME. Its default is
+    // ~/.vite-plus. On a split install, it would move configuration, runtimes,
+    // and later upgrades to that root. The split PATH would still use this
+    // binary. A monolithic install accepts each release. This includes a
+    // VP_HOME pin and an existing ~/.vite-plus install.
+    let legacy = vp_shared::VpDirs::legacy_single_root(&config.user_home);
+    if legacy.data != config.dirs.data && !vp_setup::supports_split_layout(&resolved.version) {
+        return Err(Error::Upgrade(
+            format!(
+                "vite-plus {} does not support this split directory layout. \
+                 Run `vp upgrade` to install the latest version. To use one directory, set VP_HOME.",
+                resolved.version
+            )
+            .into(),
+        ));
     }
 
     if !options.silent {
@@ -95,10 +147,17 @@ pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
     // Step 6: Download platform tarball (main package is installed via npm)
     let client = HttpClient::new();
 
-    let platform_data = client
-        .get_bytes(&resolved.platform_tarball_url)
-        .await
-        .map_err(|e| Error::Upgrade(format!("Failed to download platform package: {e}").into()))?;
+    let platform_data = if options.silent {
+        client.get_bytes(&resolved.platform_tarball_url).await
+    } else {
+        client
+            .download_bytes(
+                &resolved.platform_tarball_url,
+                &format!("Downloading vite-plus@{}...", resolved.version),
+            )
+            .await
+    }
+    .map_err(|e| Error::Upgrade(format!("Failed to download platform package: {e}").into()))?;
 
     // Step 7: Verify integrity
     integrity::verify_integrity(&platform_data, &resolved.platform_integrity)?;
@@ -113,7 +172,7 @@ pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
     // version directory on Windows because the running `vp.exe` is locked.
     // Install into a unique semver build-metadata directory instead, then
     // repoint `current` after the install has completed.
-    let active_install_dir = install::read_current_version(&install_dir).await;
+    let active_install_dir = install::read_current_version(install_dir).await;
     let install_dir_name = install::target_install_dir_name(
         &resolved.version,
         active_install_dir.as_deref(),
@@ -126,7 +185,7 @@ pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
     let result = install_platform_and_main(
         &platform_data,
         &version_dir,
-        &install_dir,
+        install_dir,
         &install_dir_name,
         &resolved.version,
         current_version,
@@ -145,7 +204,7 @@ pub async fn execute(options: UpgradeOptions) -> Result<ExitStatus, Error> {
 }
 
 /// Core installation logic, separated for error cleanup.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[allow(clippy::print_stderr)]
 async fn install_platform_and_main(
     platform_data: &[u8],
     version_dir: &AbsolutePathBuf,
@@ -172,11 +231,13 @@ async fn install_platform_and_main(
     install::generate_wrapper_package_json(version_dir, new_version).await?;
 
     // Install production dependencies (pnpm installs vite-plus + all transitive deps)
-    install::install_production_deps(version_dir, registry, silent, new_version).await?;
+    install::install_production_deps(version_dir, registry, !silent).await?;
 
     // Save previous version for rollback
     let previous_version = install::save_previous_version(install_dir).await?;
     tracing::debug!("Previous version: {:?}", previous_version);
+
+    install::clear_self_setup_marker(version_dir).await?;
 
     // Swap current link — POINT OF NO RETURN
     install::swap_current_link(install_dir, install_dir_name).await?;
@@ -197,24 +258,28 @@ async fn install_platform_and_main(
     }
 
     if !silent {
-        println!(
+        vp_shared::output::print_stdout_line(format_args!(
             "\n{} Updated vite-plus from {} {} {}",
-            output::CHECK.green(),
+            style(output::CHECK).green(),
             current_version,
             output::ARROW,
             new_version
-        );
-        println!(
+        ));
+        vp_shared::output::print_stdout_line(format_args!(
+            "\n  Run `vp migrate` in any Vite+ project using a version under {} to upgrade that project's Vite+ version.",
+            new_version
+        ));
+        vp_shared::output::print_stdout_line(format_args!(
             "\n  Release notes: https://github.com/voidzero-dev/vite-plus/releases/tag/v{}",
             new_version
-        );
+        ));
     }
 
     Ok(ExitStatus::default())
 }
 
 /// Execute rollback to the previous version.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[allow(clippy::print_stderr)]
 async fn execute_rollback(
     install_dir: &AbsolutePathBuf,
     silent: bool,
@@ -248,7 +313,11 @@ async fn execute_rollback(
     install::refresh_shims(install_dir).await?;
 
     if !silent {
-        println!("\n{} Rolled back to {}", output::CHECK.green(), previous);
+        vp_shared::output::print_stdout_line(format_args!(
+            "\n{} Rolled back to {}",
+            style(output::CHECK).green(),
+            previous
+        ));
     }
 
     Ok(ExitStatus::default())

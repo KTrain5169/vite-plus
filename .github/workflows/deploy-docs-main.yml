@@ -13,6 +13,8 @@ on:
       - 'docs/**'
       - 'packages/cli/install.sh'
       - 'packages/cli/install.ps1'
+      - 'packages/cli/install-legacy.sh'
+      - 'packages/cli/install-legacy.ps1'
       - '.github/workflows/deploy-docs-main.yml'
       - '.github/actions/deploy-docs/**'
 
@@ -30,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write # authenticate remote cache uploads
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
 

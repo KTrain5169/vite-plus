@@ -11,11 +11,12 @@ use crate::{
     Error, PackageManager, PackageManagerType,
     resolution::{
         AddArgs, ApproveBuildsArgs, AuditArgs, CacheArgs, CiArgs, ConfigCommand, DedupeArgs,
-        DeprecateArgs, DistTagCommand, DlxArgs, FundArgs, InstallArgs, LinkArgs, ListArgs,
-        LoginArgs, LogoutArgs, OutdatedArgs, OutdatedFormat, OwnerCommand, PackArgs, PatchArgs,
-        PatchCommitArgs, PingArgs, PruneArgs, PublishArgs, RebuildArgs, RemoveArgs, Resolution,
-        SearchArgs, StageCommand, TokenCommand, UnlinkArgs, UpdateArgs, VersionArgs, ViewArgs,
-        WhoamiArgs, WhyArgs, resolve_for_manager as resolve_args_for_manager,
+        DeprecateArgs, DistTagCommand, DlxArgs, FundArgs, InstallArgs, LicensesCommand, LinkArgs,
+        ListArgs, LoginArgs, LogoutArgs, OutdatedArgs, OutdatedFormat, OwnerCommand, PackArgs,
+        PatchArgs, PatchCommitArgs, PingArgs, PkgCommand, PruneArgs, PublishArgs, RebuildArgs,
+        RemoveArgs, Resolution, SearchArgs, StageCommand, TokenCommand, UnlinkArgs, UpdateArgs,
+        VersionArgs, ViewArgs, WhoamiArgs, WhyArgs,
+        resolve_for_manager as resolve_args_for_manager,
     },
 };
 
@@ -23,7 +24,7 @@ use crate::{
 ///
 /// The variants intentionally hold the production resolver argument types
 /// directly. Aliases match the existing public `vp` command surface.
-#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+#[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum PackageManagerCommand {
     /// Install all dependencies, or add packages if package names are provided
     #[command(visible_alias = "i")]
@@ -70,7 +71,7 @@ pub enum PackageManagerCommand {
 }
 
 /// Commands nested below `vp pm`.
-#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+#[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum PmCommand {
     /// Clean install dependencies for CI environments
     Ci(CiArgs),
@@ -96,12 +97,20 @@ pub enum PmCommand {
     #[command(visible_alias = "ls")]
     List(ListArgs),
 
+    /// Inspect licenses of installed dependencies
+    #[command(subcommand)]
+    Licenses(LicensesCommand),
+
     /// View package information from the registry
     #[command(visible_alias = "info", visible_alias = "show")]
     View(ViewArgs),
 
     /// Forward the native package version command
     Version(VersionArgs),
+
+    /// Manage package.json fields
+    #[command(subcommand)]
+    Pkg(PkgCommand),
 
     /// Publish package to registry
     Publish(PublishArgs),
@@ -170,6 +179,7 @@ pub enum ManagedGlobalCommand<'a> {
         packages: &'a [String],
         node: Option<&'a str>,
         force: bool,
+        ignore_scripts: bool,
         concurrency: Option<usize>,
     },
     /// Remove packages from the managed global store.
@@ -206,10 +216,7 @@ impl PackageManagerCommand {
     /// only command whose typed clap shape selects between two resolvers.
     pub(crate) fn resolve_for_manager(self, manager: &PackageManager) -> Result<Resolution, Error> {
         match self {
-            Self::Install(args) if !args.packages.is_empty() => {
-                resolve_args_for_manager(manager, args.into_add_args())
-            }
-            Self::Install(args) => resolve_args_for_manager(manager, args),
+            Self::Install(args) => args.resolve_for_manager(manager),
             Self::Add(args) => resolve_args_for_manager(manager, args),
             Self::Remove(args) => resolve_args_for_manager(manager, args),
             Self::Update(args) => resolve_args_for_manager(manager, args),
@@ -241,12 +248,14 @@ impl PackageManagerCommand {
                 packages: &args.packages,
                 node: args.node.as_deref(),
                 force: args.force,
+                ignore_scripts: args.ignore_scripts,
                 concurrency: args.concurrency,
             }),
             Self::Add(args) if args.global => Some(ManagedGlobalCommand::Install {
                 packages: &args.packages,
                 node: args.node.as_deref(),
                 force: false,
+                ignore_scripts: args.ignore_scripts,
                 concurrency: args.concurrency,
             }),
             Self::Remove(args) if args.global => Some(ManagedGlobalCommand::Remove {
@@ -280,6 +289,7 @@ impl PackageManagerCommand {
     pub fn is_quiet_or_machine_readable(&self) -> bool {
         match self {
             Self::Install(args) => args.silent,
+            Self::Add(args) => args.silent,
             Self::Dlx(args) => args.silent,
             Self::Outdated(args) => {
                 matches!(args.format, Some(OutdatedFormat::Json | OutdatedFormat::List))
@@ -298,6 +308,7 @@ impl PackageManagerCommand {
     pub(crate) fn should_render_diagnostics(&self) -> bool {
         match self {
             Self::Install(args) => !args.silent,
+            Self::Add(args) => !args.silent,
             Self::Dlx(args) => !args.silent,
             _ => true,
         }
@@ -343,8 +354,10 @@ impl PmCommand {
             Self::PatchCommit(args) => resolve_args_for_manager(manager, args),
             Self::Pack(args) => resolve_args_for_manager(manager, args),
             Self::List(args) => resolve_args_for_manager(manager, args),
+            Self::Licenses(args) => resolve_args_for_manager(manager, args),
             Self::View(args) => resolve_args_for_manager(manager, args),
             Self::Version(args) => resolve_args_for_manager(manager, args),
+            Self::Pkg(args) => resolve_args_for_manager(manager, args),
             Self::Publish(args) => resolve_args_for_manager(manager, args),
             Self::Stage(args) => resolve_args_for_manager(manager, args),
             Self::Owner(args) => resolve_args_for_manager(manager, args),
@@ -367,9 +380,11 @@ impl PmCommand {
     fn is_quiet_or_machine_readable(&self) -> bool {
         match self {
             Self::List(args) => args.json || args.parseable,
+            Self::Licenses(LicensesCommand::List { json, .. }) => *json,
             Self::Pack(args) => args.json,
             Self::View(args) => args.json,
             Self::Version(args) => args.json,
+            Self::Pkg(args) => matches!(args, PkgCommand::Get { .. }),
             Self::Publish(args) => args.json,
             Self::Audit(args) => args.json,
             Self::Search(args) => args.json,
@@ -402,7 +417,7 @@ mod tests {
     use clap::{FromArgMatches, Subcommand};
 
     use super::*;
-    use crate::{PackageManagerType, resolution::CommandResolution};
+    use crate::{PackageManagerType, resolution::test_utils::expect_run};
 
     fn parse(args: &[&str]) -> Result<PackageManagerCommand, clap::Error> {
         let command = PackageManagerCommand::augment_subcommands(clap::Command::new("vp"));
@@ -416,7 +431,7 @@ mod tests {
         PackageManager {
             client,
             version: version.into(),
-            install_dir: workspace_root.join(".test-package-manager"),
+            bin_prefix: workspace_root.join(".test-package-manager").join("bin"),
         }
     }
 
@@ -477,6 +492,65 @@ mod tests {
     }
 
     #[test]
+    fn licenses_list_parses_and_resolves_for_supported_managers() {
+        for (client, version, program, prefix) in [
+            (PackageManagerType::Pnpm, "7.17.0", "pnpm", vec!["licenses", "list"]),
+            (PackageManagerType::Yarn, "1.22.22", "yarn", vec!["licenses", "list"]),
+            (PackageManagerType::Bun, "1.4.0", "bun", vec!["pm", "licenses"]),
+        ] {
+            for subcommand in ["list", "ls"] {
+                for json in [false, true] {
+                    let mut argv = vec!["pm", "licenses", subcommand];
+                    let mut expected = prefix.clone();
+                    if json {
+                        argv.push("--json");
+                        expected.push("--json");
+                    }
+                    let command = parse(&argv).unwrap();
+                    assert_eq!(command.is_quiet_or_machine_readable(), json);
+                    assert!(command.should_render_diagnostics());
+                    let result =
+                        command.resolve_for_manager(&package_manager(client, version)).unwrap();
+                    assert!(result.diagnostics.is_empty());
+                    let resolved = expect_run(result.outcome);
+                    assert_eq!(resolved.program, program);
+                    assert_eq!(resolved.args, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pkg_parses_and_resolves_nested_commands() {
+        for (client, version, program, prefix) in [
+            (PackageManagerType::Npm, "11.0.0", "npm", vec!["pkg"]),
+            (PackageManagerType::Pnpm, "11.3.0", "pnpm", vec!["pkg"]),
+            (PackageManagerType::Bun, "1.2.19", "bun", vec!["pm", "pkg"]),
+        ] {
+            for args in [
+                vec!["get"],
+                vec!["get", "name", "scripts.build"],
+                vec!["set", "scripts.build=vite build", "private=true", "--json"],
+                vec!["delete", "scripts.build", "description"],
+                vec!["fix"],
+            ] {
+                let mut argv = vec!["pm", "pkg"];
+                argv.extend(&args);
+                let parsed = parse(&argv).unwrap();
+                assert_eq!(parsed.is_quiet_or_machine_readable(), args[0] == "get");
+                let resolution =
+                    parsed.resolve_for_manager(&package_manager(client, version)).unwrap();
+                assert!(resolution.diagnostics.is_empty());
+                let command = expect_run(resolution.outcome);
+                assert_eq!(command.program, program);
+                let mut expected = prefix.clone();
+                expected.extend(args);
+                assert_eq!(command.args, expected);
+            }
+        }
+    }
+
+    #[test]
     fn ci_parses_and_captures_pass_through_args() {
         assert!(matches!(
             parse(&["pm", "ci"]).unwrap(),
@@ -493,21 +567,139 @@ mod tests {
 
     #[test]
     fn install_uses_install_or_add_resolver_from_packages() {
-        let manager = package_manager(PackageManagerType::Pnpm, "10.0.0");
-        let install = parse(&["install", "--frozen-lockfile"]).unwrap();
-        let add = parse(&["install", "-D", "react"]).unwrap();
+        for (client, version, install_args, add_args) in [
+            (
+                PackageManagerType::Pnpm,
+                "10.0.0",
+                vec!["install", "--frozen-lockfile"],
+                vec!["add", "--save-dev", "react"],
+            ),
+            (
+                PackageManagerType::Npm,
+                "11.16.0",
+                vec!["ci"],
+                vec!["install", "--save-dev", "react"],
+            ),
+            (
+                PackageManagerType::Bun,
+                "1.4.0",
+                vec!["install", "--frozen-lockfile"],
+                vec!["add", "--dev", "react"],
+            ),
+            (
+                PackageManagerType::Yarn,
+                "1.22.22",
+                vec!["install", "--frozen-lockfile"],
+                vec!["add", "--dev", "react"],
+            ),
+            (
+                PackageManagerType::Yarn,
+                "4.16.0",
+                vec!["install", "--immutable"],
+                vec!["add", "--dev", "react"],
+            ),
+        ] {
+            let manager = package_manager(client, version);
+            let install = parse(&["install", "--frozen-lockfile"]).unwrap();
+            let add = parse(&["install", "-D", "react"]).unwrap();
 
-        let CommandResolution::Run(install) =
-            install.resolve_for_manager(&manager).unwrap().outcome
-        else {
-            panic!("expected install command");
-        };
-        let CommandResolution::Run(add) = add.resolve_for_manager(&manager).unwrap().outcome else {
-            panic!("expected add command");
-        };
+            let install = expect_run(install.resolve_for_manager(&manager).unwrap().outcome);
+            let add = expect_run(add.resolve_for_manager(&manager).unwrap().outcome);
 
-        assert_eq!(install.args, vec!["install", "--frozen-lockfile"]);
-        assert_eq!(add.args, vec!["add", "--save-dev", "react"]);
+            assert_eq!(install.args, install_args);
+            assert_eq!(add.args, add_args);
+        }
+    }
+
+    #[test]
+    fn yarn_before_3_rejects_lockfile_only_when_adding_packages() {
+        for version in ["2.4.2", "2.0.0", "1.22.22"] {
+            let manager = package_manager(PackageManagerType::Yarn, version);
+            for command in ["add", "install", "i"] {
+                let resolution = parse(&[command, "./dep", "--lockfile-only"])
+                    .unwrap()
+                    .resolve_for_manager(&manager)
+                    .unwrap();
+                crate::resolution::test_utils::expect_unsupported(
+                    resolution,
+                    &["yarn < 3 does not support --lockfile-only."],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn yarn_from_3_preserves_lockfile_only_when_adding_packages() {
+        for version in ["3.0.0", "3.1.0", "4.10.3"] {
+            let manager = package_manager(PackageManagerType::Yarn, version);
+            for command in ["add", "install", "i"] {
+                let resolution = parse(&[command, "./dep", "--lockfile-only"])
+                    .unwrap()
+                    .resolve_for_manager(&manager)
+                    .unwrap();
+                let resolved = crate::resolution::test_utils::expect_run(resolution.outcome);
+
+                assert_eq!(
+                    resolved.args,
+                    ["add", "--mode", "update-lockfile", "./dep"],
+                    "yarn@{version}: {command}"
+                );
+                assert!(resolution.diagnostics.is_empty(), "yarn@{version}: {command}");
+            }
+        }
+    }
+
+    #[test]
+    fn install_and_add_preserve_ignore_scripts() {
+        for (client, version, add_command, flags) in [
+            (PackageManagerType::Npm, "11.0.0", "install", vec!["--ignore-scripts"]),
+            (PackageManagerType::Pnpm, "10.0.0", "add", vec!["--ignore-scripts"]),
+            (PackageManagerType::Yarn, "1.22.22", "add", vec!["--ignore-scripts"]),
+            (PackageManagerType::Yarn, "4.0.0", "add", vec!["--mode", "skip-build"]),
+            (PackageManagerType::Bun, "1.3.11", "add", vec!["--ignore-scripts"]),
+        ] {
+            let manager = package_manager(client, version);
+            for input in [
+                vec!["install", "--ignore-scripts"],
+                vec!["install", "--ignore-scripts", "react"],
+                vec!["install", "react", "--ignore-scripts"],
+                vec!["i", "react", "--ignore-scripts"],
+                vec!["add", "--ignore-scripts", "react"],
+                vec!["add", "react", "--ignore-scripts"],
+            ] {
+                let resolution = parse(&input).unwrap().resolve_for_manager(&manager).unwrap();
+                let command = crate::resolution::test_utils::expect_run(resolution.outcome);
+                let has_packages = input.contains(&"react");
+                let mut expected = vec![if has_packages { add_command } else { "install" }];
+                expected.extend(&flags);
+                if has_packages {
+                    expected.push("react");
+                }
+
+                assert_eq!(command.program, client.to_string(), "{client}@{version}: {input:?}");
+                assert_eq!(command.args, expected, "{client}@{version}: {input:?}");
+                assert!(resolution.diagnostics.is_empty(), "{client}@{version}: {input:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn managed_global_install_preserves_ignore_scripts() {
+        for command in ["install", "i", "add"] {
+            for input in [
+                vec![command, "-g", "react"],
+                vec![command, "-g", "--ignore-scripts", "react"],
+                vec![command, "-g", "react", "--ignore-scripts"],
+            ] {
+                let parsed = parse(&input).unwrap();
+                let Some(ManagedGlobalCommand::Install { ignore_scripts, .. }) =
+                    parsed.managed_global_command()
+                else {
+                    panic!("expected managed install command: {input:?}");
+                };
+                assert_eq!(ignore_scripts, input.contains(&"--ignore-scripts"), "{input:?}");
+            }
+        }
     }
 
     #[test]
@@ -547,7 +739,7 @@ mod tests {
         let install =
             parse(&["install", "-g", "--node", "22", "--force", "--concurrency", "2", "tsx"])
                 .unwrap();
-        let Some(ManagedGlobalCommand::Install { packages, node, force, concurrency }) =
+        let Some(ManagedGlobalCommand::Install { packages, node, force, concurrency, .. }) =
             install.managed_global_command()
         else {
             panic!("expected managed install command");
@@ -611,6 +803,7 @@ mod tests {
     fn classifies_quiet_and_machine_readable_commands() {
         for args in [
             &["install", "--silent"][..],
+            &["add", "react", "--silent"][..],
             &["dlx", "--silent", "tsx"][..],
             &["outdated", "--format", "json"][..],
             &["why", "react", "--parseable"][..],
@@ -633,6 +826,7 @@ mod tests {
             assert!(!parse(args).unwrap().is_quiet_or_machine_readable(), "{args:?}");
         }
         assert!(!parse(&["install"]).unwrap().is_quiet_or_machine_readable());
+        assert!(!parse(&["add", "react"]).unwrap().is_quiet_or_machine_readable());
     }
 
     #[test]
@@ -704,6 +898,7 @@ mod tests {
     #[test]
     fn suppresses_diagnostics_only_for_explicit_silent_modes() {
         for args in [
+            &["add", "react"][..],
             &["outdated", "--format", "json"][..],
             &["why", "react", "--parseable"][..],
             &["info", "react", "--json"][..],
@@ -712,7 +907,11 @@ mod tests {
             assert!(parse(args).unwrap().should_render_diagnostics(), "{args:?}");
         }
 
-        for args in [&["install", "--silent"][..], &["dlx", "--silent", "tsx"][..]] {
+        for args in [
+            &["install", "--silent"][..],
+            &["add", "react", "--silent"][..],
+            &["dlx", "--silent", "tsx"][..],
+        ] {
             assert!(!parse(args).unwrap().should_render_diagnostics(), "{args:?}");
         }
     }

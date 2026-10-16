@@ -63,12 +63,12 @@ Run each task twice:
 vp run build
 vp run build # should print "cache hit"
 vp run lint
-vp run lint # should print "cache hit"
+vp run lint  # should print "cache hit"
 ```
 
 ## 2. Restore The Cache After Install
 
-Use the `task-cache` toggle to enable saving the task cache to GitHub Actions Cache.
+If using the built-in task cache manager, use the `task-cache` toggle to enable saving the task cache to GitHub Actions Cache.
 It will use the key configuration seen later on this page.
 
 Set `<setup-vp-version>` below to an exact version from the [`setup-vp` releases page](https://github.com/voidzero-dev/setup-vp/releases). You can also use a commit SHA instead, which can pin the action to a specific build.
@@ -99,7 +99,7 @@ jobs:
           task-cache: true
 ```
 
-Otherwise, remember to restore `node_modules/.vite/task-cache` after `vp install`, because package installation can recreate or modify `node_modules`.
+If not using the built-in task cache manager, remember to restore `node_modules/.vite/task-cache` after `vp install`, because package installation can recreate or modify `node_modules`.
 
 ```yaml [.github/workflows/ci.yml]
 name: CI
@@ -122,8 +122,6 @@ jobs:
         with:
           node-version: '24'
           cache: true
-
-      - run: vp install
 
       - name: Restore Vite Task cache
         id: vite-task-cache

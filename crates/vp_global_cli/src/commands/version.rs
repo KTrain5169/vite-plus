@@ -1,8 +1,10 @@
 //! Version command.
 
+#![deny(clippy::print_stdout)]
+
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     process::ExitStatus,
 };
@@ -121,12 +123,16 @@ fn resolve_tool_version(
     }
 }
 
+fn print_stdout(message: &str) {
+    vp_shared::output::print_and_flush(&mut io::stdout().lock(), message);
+}
+
 fn print_rows(title: &str, rows: &[(&str, String)]) {
-    println!("{}", help::render_heading(title));
+    print_stdout(&format!("{}\n", help::render_heading(title)));
     let label_width = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0);
     for (label, value) in rows {
         let padding = " ".repeat(label_width.saturating_sub(label.chars().count()));
-        println!("  {}{}  {value}", help::accent(label), padding);
+        print_stdout(&format!("  {}{}  {value}\n", help::accent(label), padding));
     }
 }
 
@@ -169,8 +175,7 @@ fn detect_system_node_version() -> Option<String> {
 pub async fn execute(cwd: AbsolutePathBuf) -> Result<ExitStatus, Error> {
     vp_shared::header::print_header();
 
-    println!("vp v{}", env!("CARGO_PKG_VERSION"));
-    println!();
+    print_stdout(concat!("vp v", env!("CARGO_PKG_VERSION"), "\n\n"));
 
     // Local vite-plus and tools
     let local = find_local_vite_plus(cwd.as_path());
@@ -178,7 +183,7 @@ pub async fn execute(cwd: AbsolutePathBuf) -> Result<ExitStatus, Error> {
         "Local vite-plus",
         &[("vite-plus", format_version(local.as_ref().map(|pkg| pkg.version.clone())))],
     );
-    println!();
+    print_stdout("\n");
 
     let manifest = local.as_ref().and_then(read_toolchain_manifest);
     let tool_rows = TOOL_SPECS
@@ -189,7 +194,7 @@ pub async fn execute(cwd: AbsolutePathBuf) -> Result<ExitStatus, Error> {
         })
         .collect::<Vec<_>>();
     print_rows("Tools", &tool_rows);
-    println!();
+    print_stdout("\n");
 
     // Environment info
     let package_manager_info = find_workspace_root(&cwd)
@@ -228,8 +233,6 @@ mod tests {
     #[cfg(unix)]
     use std::{fs, path::Path};
 
-    use serial_test::serial;
-
     #[cfg(unix)]
     use super::{TOOL_SPECS, find_local_vite_plus, read_toolchain_manifest, resolve_tool_version};
     use super::{detect_system_node_version, format_version};
@@ -245,17 +248,24 @@ mod tests {
         assert_eq!(format_version(None), "Not found");
     }
 
-    // Run serially: the spawned `node` inherits this process's environment, and
-    // concurrent #[serial] tests mutate PATH/VP_HOME via std::env::set_var,
-    // which can make a vp shim on PATH resolve incorrectly mid-test.
+    // The spawned `node` inherits this process's environment, so hold
+    // temp_env's lock with PATH/VP_HOME re-pinned to their current values:
+    // no concurrent with_vars scope can swap them mid-test and make a vp shim
+    // on PATH resolve incorrectly.
     #[test]
-    #[serial]
     fn detect_system_node_version_returns_version() {
-        let version = detect_system_node_version();
-        assert!(version.is_some(), "expected node to be installed");
-        let version = version.unwrap();
-        assert!(!version.starts_with('v'), "version should not have v prefix");
-        assert!(version.contains('.'), "expected semver-like version, got: {version}");
+        let path = std::env::var_os("PATH");
+        let vp_home = std::env::var_os(vp_shared::env_vars::VP_HOME);
+        temp_env::with_vars(
+            [("PATH", path.as_deref()), (vp_shared::env_vars::VP_HOME, vp_home.as_deref())],
+            || {
+                let version = detect_system_node_version();
+                assert!(version.is_some(), "expected node to be installed");
+                let version = version.unwrap();
+                assert!(!version.starts_with('v'), "version should not have v prefix");
+                assert!(version.contains('.'), "expected semver-like version, got: {version}");
+            },
+        );
     }
 
     #[cfg(unix)]

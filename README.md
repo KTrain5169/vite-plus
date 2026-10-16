@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://viteplus.dev" target="_blank" rel="noopener noreferrer">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="/logo.svg">
-      <img alt="Vite+" src="/logo.svg" height="60">
+      <source media="(prefers-color-scheme: dark)" srcset="./docs/public/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="./docs/public/logo.svg">
+      <img alt="Vite+" src="./docs/public/logo.svg" height="60">
     </picture>
   </a>
 </p>
@@ -15,7 +15,7 @@ _runtime and package management, create, dev, check, test, build, pack, and mono
 
 Vite+ is the unified entry point for local web development. It combines [Vite](https://vite.dev/), [Vitest](https://vitest.dev/), [Oxlint](https://oxc.rs/docs/guide/usage/linter.html), [Oxfmt](https://oxc.rs/docs/guide/usage/formatter.html), [Rolldown](https://rolldown.rs/), [tsdown](https://tsdown.dev/), and [Vite Task](https://github.com/voidzero-dev/vite-task) into one zero-config toolchain that also manages runtime and package manager workflows:
 
-- **`vp env`:** Manage Node.js globally and per project
+- **`vp env`:** Manage Node.js and package managers globally and per project
 - **`vp install`:** Install dependencies with automatic package manager detection
 - **`vp dev`:** Run Vite's fast native ESM dev server with instant HMR
 - **`vp check`:** Run formatting, linting, and type checks in one command
@@ -79,7 +79,9 @@ export default defineConfig({
     tasks: {
       'generate:icons': {
         command: 'node scripts/generate-icons.js',
-        envs: ['ICON_THEME'],
+        cache: {
+          env: ['ICON_THEME'],
+        },
       },
     },
   },
@@ -105,7 +107,7 @@ Use `vp migrate` to migrate to Vite+. It merges tool-specific config files such 
 - **hooks** - Manage the Git hook dispatcher
 - **staged** - Run linters on staged files
 - **install** (`i`) - Install dependencies
-- **env** - Manage Node.js versions
+- **env** - Manage Node.js and package managers
 
 #### Develop
 
@@ -202,12 +204,12 @@ If you are manually migrating a project to Vite+, install these dev dependencies
 vp install -D vite-plus
 ```
 
-Add package-manager overrides so that other packages use the Vite+ versions. Alias `vite` to `@voidzero-dev/vite-plus-core`. Pin `vitest` to the version from `vp toolchain vitest`. The project and `vp test` then use the same Vitest copy. Without the pin, a dependency or workspace package can install a different Vitest version. The two versions can use separate mocks, `expect` functions, and runner states:
+Add package-manager overrides so that other packages use the Vite+ versions. Alias `vite` to `@voidzero-dev/vite-plus-core`, setting `<vite-plus-version>` to the installed `vite-plus` version. Pin `vitest` to `<vitest-version>`, using the bundled version shown by `vp toolchain vitest`. The project and `vp test` then use the same Vitest copy. Without the pin, a dependency or workspace package can install a different Vitest version. The two versions can use separate mocks, `expect` functions, and runner states:
 
 ```json
 "overrides": {
-  "vite": "npm:@voidzero-dev/vite-plus-core@latest",
-  "vitest": "4.1.10"
+  "vite": "npm:@voidzero-dev/vite-plus-core@<vite-plus-version>",
+  "vitest": "<vitest-version>"
 }
 ```
 
@@ -215,16 +217,16 @@ If you are using `pnpm`, add this to your `pnpm-workspace.yaml`:
 
 ```yaml
 overrides:
-  vite: npm:@voidzero-dev/vite-plus-core@latest
-  vitest: 4.1.10
+  vite@*: npm:@voidzero-dev/vite-plus-core@<vite-plus-version> # Match the installed vite-plus version
+  vitest@*: <vitest-version> # Match the version from vp toolchain vitest
 ```
 
 Or, if you are using Yarn:
 
 ```json
 "resolutions": {
-  "vite": "npm:@voidzero-dev/vite-plus-core@latest",
-  "vitest": "4.1.10"
+  "vite": "npm:@voidzero-dev/vite-plus-core@<vite-plus-version>",
+  "vitest": "<vitest-version>"
 }
 ```
 

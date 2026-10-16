@@ -28,15 +28,7 @@ check eslint removed and scripts rewritten
   },
   "devDependencies": {
     "eslint": "^9.0.0",
-    "vite": "catalog:",
     "vite-plus": "catalog:"
-  },
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "<version>",
-      "onFail": "download"
-    }
   }
 }
 ```
