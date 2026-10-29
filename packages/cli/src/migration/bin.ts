@@ -40,6 +40,7 @@ import {
 import type { PackageDependencies } from '../utils/types.ts';
 import { detectWorkspace } from '../utils/workspace.ts';
 import { checkRolldownCompatibility } from './compat/runner.ts';
+import { detectMigrationWarnings } from './detector.ts';
 import { canFormatWithOxfmt, collectChangedFormatPaths, formatMigratedProject } from './format.ts';
 import {
   addFrameworkShim,
@@ -740,6 +741,9 @@ async function executeMigrationPlan(
   report: MigrationReport;
 }> {
   const report = createMigrationReport();
+  report.warnings.push(
+    ...detectMigrationWarnings(workspaceInfoOptional.rootDir, workspaceInfoOptional.packages),
+  );
   const migrationProgress = interactive ? prompts.spinner({ indicator: 'timer' }) : undefined;
   let migrationProgressStarted = false;
   const updateMigrationProgress = (message: string) => {
@@ -1078,6 +1082,9 @@ async function main() {
     let finalInstallOk = true;
     let canFormatMigratedProject = !process.env.VP_SKIP_INSTALL;
     const report = createMigrationReport();
+    report.warnings.push(
+      ...detectMigrationWarnings(workspaceInfoOptional.rootDir, workspaceInfoOptional.packages),
+    );
     // Report reviews at the end with updated locations. Keep them out of the
     // report until then so review-only items do not force an up-to-date project
     // through dependency reconciliation on every run.
