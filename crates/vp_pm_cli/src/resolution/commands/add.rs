@@ -16,19 +16,19 @@ pub struct AddArgs {
     pub(crate) save_exact: bool,
 
     /// Save the new dependency to the specified catalog name
-    #[arg(long, value_name = "CATALOG_NAME", not_supported(npm, yarn, bun < "1.4"))]
+    #[arg(long, value_name = "CATALOG_NAME", not_supported(npm, pnpm < "10.12.0", yarn, bun < "1.4"))]
     pub(crate) save_catalog_name: Option<String>,
 
     /// Save the new dependency to the default catalog
-    #[arg(long, not_supported(npm, yarn, bun < "1.4"))]
+    #[arg(long, not_supported(npm, pnpm < "10.12.0", yarn, bun < "1.4"))]
     pub(crate) save_catalog: bool,
 
     /// A list of package names allowed to run postinstall
-    #[arg(long, value_name = "NAMES", not_supported(npm, yarn, bun))]
+    #[arg(long, value_name = "NAMES", not_supported(npm, pnpm < "10.4.0", yarn, bun))]
     pub(crate) allow_build: Option<String>,
 
     /// Do not run lifecycle scripts
-    #[arg(long)]
+    #[arg(long, not_supported(yarn >= "2" && < "3"))]
     pub(crate) ignore_scripts: bool,
 
     /// Do not install optionalDependencies
@@ -82,11 +82,11 @@ pub struct AddArgs {
     pub(crate) silent: bool,
 
     /// Filter packages in monorepo (can be used multiple times)
-    #[arg(long, value_name = "PATTERN", not_supported(yarn < "2", bun < "1.4"))]
+    #[arg(long, value_name = "PATTERN", not_supported(npm < "7.14.0", yarn < "2", bun < "1.4"))]
     pub(crate) filter: Vec<String>,
 
     /// Add to workspace root
-    #[arg(short = 'w', long, not_supported(yarn >= "2", bun))]
+    #[arg(short = 'w', long, not_supported(npm < "8.1.0", yarn >= "2", bun))]
     pub(crate) workspace_root: bool,
 
     /// Only add if package exists in workspace (pnpm-specific)
@@ -166,7 +166,7 @@ impl SaveDependencyArgs {
 impl Resolve<AddArgs> for Pnpm {
     fn resolve(&self, args: &AddArgs, _diag: &mut Diagnostics) -> CommandResolution {
         if args.global {
-            return Npm::resolve_add(args);
+            return Npm::unknown_version().resolve_add(args);
         }
         let mut cmd = CommandBuilder::new("pnpm");
         cmd.repeated("--filter", args.filter.iter());
@@ -216,7 +216,7 @@ impl Resolve<AddArgs> for Pnpm {
 }
 
 impl Npm {
-    fn resolve_add(args: &AddArgs) -> CommandResolution {
+    fn resolve_add(&self, args: &AddArgs) -> CommandResolution {
         let mut cmd = CommandBuilder::new("npm");
         if args.global {
             cmd.arg("install")
@@ -247,7 +247,10 @@ impl Npm {
         }
         cmd.arg_if("--save-exact", args.save_exact)
             .arg_if("--ignore-scripts", args.ignore_scripts)
-            .arg_if("--omit=optional", args.no_optional)
+            .arg_if(
+                if self.supports_v7_commands() { "--omit=optional" } else { "--no-optional" },
+                args.no_optional,
+            )
             .arg_if("--package-lock-only", args.lockfile_only)
             .arg_if("--prefer-offline", args.prefer_offline)
             .arg_if("--offline", args.offline)
@@ -263,14 +266,14 @@ impl Npm {
 
 impl Resolve<AddArgs> for Npm {
     fn resolve(&self, args: &AddArgs, _diag: &mut Diagnostics) -> CommandResolution {
-        Self::resolve_add(args)
+        self.resolve_add(args)
     }
 }
 
 impl Resolve<AddArgs> for Yarn {
     fn resolve(&self, args: &AddArgs, diag: &mut Diagnostics) -> CommandResolution {
         if args.global {
-            return Npm::resolve_add(args);
+            return Npm::unknown_version().resolve_add(args);
         }
 
         let mut cmd = CommandBuilder::new("yarn");
@@ -293,7 +296,7 @@ impl Resolve<AddArgs> for Yarn {
         }
         cmd.arg_if("--exact", args.save_exact);
         if self.is_berry() {
-            Self::apply_berry_install_mode(&mut cmd, args.lockfile_only, args.ignore_scripts, diag);
+            self.apply_berry_install_mode(&mut cmd, args.lockfile_only, args.ignore_scripts, diag);
         } else {
             cmd.arg_if("--frozen-lockfile", args.frozen_lockfile)
                 .arg_if("--ignore-scripts", args.ignore_scripts)
@@ -312,7 +315,7 @@ impl Resolve<AddArgs> for Yarn {
 impl Resolve<AddArgs> for Bun {
     fn resolve(&self, args: &AddArgs, _diag: &mut Diagnostics) -> CommandResolution {
         if args.global {
-            return Npm::resolve_add(args);
+            return Npm::unknown_version().resolve_add(args);
         }
         let mut cmd = CommandBuilder::new("bun");
         cmd.arg("add").repeated("--filter", args.filter.iter());
@@ -412,7 +415,7 @@ mod tests {
         let mut options = add_args(&["react"]);
         options.filter = vec!["app".to_string()];
         options.save_catalog_name = Some("react18".to_string());
-        let resolution = resolve(&pnpm("10.0.0"), options);
+        let resolution = resolve(&pnpm("10.12.0"), options);
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "pnpm");
@@ -427,7 +430,7 @@ mod tests {
         let mut options = add_args(&["react"]);
         options.filter = vec!["app".to_string()];
         options.save_catalog_name = Some(String::new());
-        let resolution = resolve(&pnpm("10.0.0"), options);
+        let resolution = resolve(&pnpm("10.12.0"), options);
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "pnpm");
@@ -439,7 +442,7 @@ mod tests {
         let mut options = add_args(&["react"]);
         options.filter = vec!["app".to_string()];
         options.save_catalog = true;
-        let resolution = resolve(&pnpm("10.0.0"), options);
+        let resolution = resolve(&pnpm("10.12.0"), options);
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "pnpm");
@@ -653,7 +656,7 @@ mod tests {
     fn test_pnpm_add_with_allow_build() {
         let mut options = add_args(&["react"]);
         options.allow_build = Some("react,napi".to_string());
-        let resolution = resolve(&pnpm("10.0.0"), options);
+        let resolution = resolve(&pnpm("10.4.0"), options);
         let command = expect_run(resolution.outcome);
 
         assert_eq!(command.program, "pnpm");

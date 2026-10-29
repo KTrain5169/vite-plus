@@ -41,7 +41,9 @@ pub async fn download_file(
     message: &str,
 ) -> Result<(), Error> {
     let client = vp_shared::shared_http_client()?;
+    let archive_filename = target_path.as_path().file_name().unwrap_or_default().to_string_lossy();
 
+    tracing::info!("Fetching archive: {archive_filename}");
     tracing::debug!("Downloading {url} to {target_path:?}");
 
     // Create progress bar (only in TTY and not in CI). Built once and reused
@@ -162,7 +164,7 @@ pub async fn download_file(
             )));
         }
 
-        Ok(())
+        Ok(bytes_written)
     })
     .retry(
         ExponentialBuilder::default()
@@ -170,6 +172,9 @@ pub async fn download_file(
             .with_min_delay(Duration::from_millis(500))
             .with_max_times(3),
     )
+    .notify(|_, delay| {
+        tracing::warn!("Retrying {archive_filename} in {:.1}s", delay.as_secs_f64());
+    })
     .await
     .map_err(|e| Error::DownloadFailed {
         url: url.into(),
@@ -178,9 +183,9 @@ pub async fn download_file(
 
     drop(progress);
 
-    result?;
+    let size_bytes = result?;
 
-    tracing::debug!("Download completed: {target_path:?}");
+    tracing::info!("Downloaded {archive_filename}: {size_bytes} bytes");
 
     Ok(())
 }
@@ -492,6 +497,44 @@ mod tests {
 
     fn temp_target(dir: &TempDir) -> AbsolutePathBuf {
         AbsolutePathBuf::new(dir.path().join("archive.tar.gz")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn extracts_zip_runtime_archives() {
+        use std::io::Write;
+
+        use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+        for compression in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let temp = TempDir::new().unwrap();
+            let root = AbsolutePathBuf::new(temp.path().to_path_buf()).unwrap();
+            let archive_path = root.join("node.zip");
+            let target = root.join("extracted");
+            let contents = b"mock node binary";
+            let mut archive = ZipWriter::new(File::create(&archive_path).unwrap());
+            let options = SimpleFileOptions::default().compression_method(compression);
+            archive.add_directory("node-win-x64/", options).unwrap();
+            archive.start_file("node-win-x64/node.exe", options).unwrap();
+            archive.write_all(contents).unwrap();
+            archive.finish().unwrap();
+
+            extract_archive(&archive_path, &target, ArchiveFormat::Zip).await.unwrap();
+
+            assert_eq!(std::fs::read(target.join("node-win-x64/node.exe")).unwrap(), contents);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_zip_runtime_archives() {
+        let temp = TempDir::new().unwrap();
+        let root = AbsolutePathBuf::new(temp.path().to_path_buf()).unwrap();
+        let archive_path = root.join("node.zip");
+        std::fs::write(&archive_path, b"not a ZIP archive").unwrap();
+
+        let result =
+            extract_archive(&archive_path, &root.join("extracted"), ArchiveFormat::Zip).await;
+
+        assert!(matches!(result, Err(Error::ExtractionFailed { .. })));
     }
 
     async fn read_request(socket: &mut TcpStream) -> String {

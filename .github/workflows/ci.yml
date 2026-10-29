@@ -27,9 +27,14 @@ defaults:
   run:
     shell: bash
 
+env:
+  # Change the repository Actions variable to switch managed Node.js downloads.
+  VP_NODE_DIST_MIRROR: ${{ vars.VP_NODE_DIST_MIRROR || 'https://nodejs.org/dist' }}
+
 jobs:
   detect-changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: read
@@ -61,7 +66,8 @@ jobs:
     # them (code changes get `vp check` in cli-e2e-test). The required `done`
     # job waits for this check and propagates failures.
     if: needs.detect-changes.outputs.code-changed == 'false'
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: read
@@ -97,6 +103,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: read
@@ -113,11 +120,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: namespace-profile-linux-x64-default
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: namespace-profile-mac-default
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -144,7 +152,8 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
     name: Build Windows tests
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       XWIN_ACCEPT_LICENSE: '1'
       # The MSVC STL from xwin's VS17 manifest static-asserts a minimum Clang
@@ -231,6 +240,7 @@ jobs:
     needs: build-windows-tests
     name: Test (Windows)
     runs-on: namespace-profile-windows-4c-8g
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -269,10 +279,13 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
     name: Test (Linux x64 musl)
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     container:
-      image: node:25-alpine3.21
+      image: node:26.12.1-alpine
     env:
+      # Mirrors of official Node.js releases do not provide musl archives.
+      VP_NODE_DIST_MIRROR: https://unofficial-builds.nodejs.org/download/release
       # GitHub Actions sets HOME=/github/home in containers, but the euid home is /root.
       # Pin Rust tooling paths to avoid $HOME mismatch issues.
       CARGO_HOME: /root/.cargo
@@ -308,7 +321,11 @@ jobs:
         run: |
           # GitHub Actions sets HOME=/github/home in containers, but rustup expects euid home (/root)
           export HOME=/root
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          # Retry connection resets, and run only a complete installer download.
+          curl --proto '=https' --tlsv1.2 -sSf --retry 3 --retry-all-errors \
+            --retry-delay 2 --connect-timeout 30 --max-time 120 \
+            --output "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --default-toolchain none
           echo "/root/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
@@ -321,7 +338,8 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
     name: Lint
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -373,7 +391,8 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
     name: Build Windows CLI binaries
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -392,7 +411,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: namespace-profile-linux-x64-default
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             test-node: 22.18.0
           - os: namespace-profile-mac-default
@@ -402,6 +421,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             test-node: 26.0.0
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -485,7 +505,7 @@ jobs:
           RUST_MIN_STACK: 8388608
 
       - name: Test global package install (powershell)
-        if: ${{ matrix.os != 'namespace-profile-linux-x64-default' }}
+        if: ${{ runner.os != 'Linux' }}
         shell: pwsh
         run: |
           $vpHome = Join-Path $HOME ".vite-plus"
@@ -667,7 +687,7 @@ jobs:
           fi
 
       - name: Test upgrade (powershell)
-        if: ${{ matrix.os != 'namespace-profile-linux-x64-default' }}
+        if: ${{ runner.os != 'Linux' }}
         shell: pwsh
         run: |
           $vpHome = Join-Path $HOME ".vite-plus"
@@ -883,7 +903,7 @@ jobs:
           vp --version
 
       - name: Test implode (powershell)
-        if: ${{ matrix.os != 'namespace-profile-linux-x64-default' }}
+        if: ${{ runner.os != 'Linux' }}
         shell: pwsh
         run: |
           $vpHome = Join-Path $HOME ".vite-plus"
@@ -943,11 +963,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: namespace-profile-linux-x64-default
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: namespace-profile-mac-default
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -1028,14 +1049,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [namespace-profile-linux-x64-default, namespace-profile-mac-default]
+        os: [ubuntu-latest, namespace-profile-mac-default]
         shard: [1, 2, 3]
         include:
-          - os: namespace-profile-linux-x64-default
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: namespace-profile-mac-default
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -1057,11 +1079,12 @@ jobs:
             "$snapshot_shell" --version
           done
 
-      # https://github.com/marketplace/actions/setup-nu
+      # Includes release lookup retries: https://github.com/hustcer/setup-nu/pull/225.
       - name: Install Nushell
-        uses: hustcer/setup-nu@ccd5bb5426b05a32009c2ba967946231f3919c97 # v3.25
+        uses: hustcer/setup-nu@eacad52a4634c4f8d17a94916f93be6856861b9c # v3.29
         with:
-          version: '*'
+          # renovate: datasource=github-releases depName=nushell/nushell
+          version: '0.116.1'
 
       - uses: ./.github/actions/setup-ci-node
 
@@ -1091,12 +1114,12 @@ jobs:
       - name: Install Global CLI vp
         run: pnpm bootstrap-cli:ci
 
-      # Seed both the repository pin and the default LTS before command timers
-      # start. Fixtures without a version pin use LTS, not the repository pin.
+      # Seed the repository pin, default LTS, and shared fixture versions before
+      # command timers start. Keep the version list shared across platforms.
       - name: Prewarm managed runtimes
-        run: |
-          "$HOME/.vite-plus/bin/vp" node --version
-          VP_NODE_VERSION=lts "$HOME/.vite-plus/bin/vp" node --version
+        run: bash .github/scripts/prewarm-node.sh "$HOME/.vite-plus/bin/vp"
+        env:
+          VP_LOG: vp_js_runtime=info
 
       - wait: [snapshot-shells, playwright]
 
@@ -1150,6 +1173,7 @@ jobs:
     # ConPTY spawn blocked and every case timed out at 60s. #2126 (vite-task
     # bump) resolved that; revert to windows-latest if it recurs.
     runs-on: namespace-profile-windows-4c-8g
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -1212,13 +1236,13 @@ jobs:
         shell: bash
         run: pnpm bootstrap-cli:ci
 
-      # Seed both the repository pin and the default LTS before command timers
-      # start. Fixtures without a version pin use LTS, not the repository pin.
+      # Seed the repository pin, default LTS, and shared fixture versions before
+      # command timers start. Keep the version list shared across platforms.
       - name: Prewarm managed runtimes
         shell: bash
-        run: |
-          "$USERPROFILE/.vite-plus/bin/vp.exe" node --version
-          VP_NODE_VERSION=lts "$USERPROFILE/.vite-plus/bin/vp.exe" node --version
+        run: bash .github/scripts/prewarm-node.sh "$USERPROFILE/.vite-plus/bin/vp.exe"
+        env:
+          VP_LOG: vp_js_runtime=info
 
       # Keep fixtures outside runner.temp: setup-node writes an .npmrc there,
       # which Yarn Classic discovers when walking parent directories.
@@ -1255,30 +1279,50 @@ jobs:
           # Generate the overrides from the fixtures, including automatic Ctrl-C
           # isolation, so this configuration cannot drift from the runner.
           VP_SNAP_NEXTEST_CONFIG="$RUNNER_TEMP/snapshot-nextest.toml" \
+            VP_SNAP_PREWARM_MANIFEST="$RUNNER_TEMP/snapshot-prewarm.json" \
             cargo-nextest nextest list --archive-file windows-snapshot-tests.tar.zst --workspace-remap . \
             > "$RUNNER_TEMP/snapshot-test-list.txt"
+          # Derive Bun archives from the same fixtures as the test list, so
+          # version changes need no matching CI edit. Only response bytes are shared.
+          node packages/tools/src/local-npm-registry.ts \
+            --snapshot-cache "$VP_SNAP_REGISTRY_CACHE_DIR" \
+            --request-log "$VP_SNAP_ARTIFACTS_DIR/prewarm/registry.jsonl" \
+            --prewarm-manifest "$RUNNER_TEMP/snapshot-prewarm.json"
           nextest_run_args=(
             --test-threads 8 --config-file "$RUNNER_TEMP/snapshot-nextest.toml"
             --archive-file windows-snapshot-tests.tar.zst --workspace-remap . --no-fail-fast
           )
+          snapshot_registry=(
+            node packages/tools/src/local-npm-registry.ts --snapshot-runner
+            --snapshot-fixtures "$GITHUB_WORKSPACE/crates/vp_cli_snapshots/tests/cli_snapshots/registry"
+            --snapshot-cache "$VP_SNAP_REGISTRY_CACHE_DIR"
+          )
+          run_snapshots() {
+            # Keep both registries alive across nextest's one-process-per-case
+            # workers. Only local-registry cases receive checkout packages.
+            "${snapshot_registry[@]}" --request-log "$VP_SNAP_ARTIFACTS_DIR/shared-registry/registry.jsonl" -- \
+              "${snapshot_registry[@]}" --packages-dir "$VP_SNAP_PACKAGES_DIR/packages" \
+                --request-log "$VP_SNAP_ARTIFACTS_DIR/packed-registry/registry.jsonl" -- \
+                cargo-nextest nextest run "${nextest_run_args[@]}" "$@"
+          }
           # --no-fail-fast: on a snapshot suite every diff is diagnostic
           # signal; cancelling on the first failure hides the rest.
           test_exit=0
           # This fixture requires case-sensitive directory support, which the
           # default temp directory on these runners does not provide.
-          cargo-nextest nextest run "${nextest_run_args[@]}" --partition hash:${{ matrix.shard }}/3 \
+          run_snapshots --partition hash:${{ matrix.shard }}/3 \
             -E 'not test(windows_case_sensitive_shims)' || test_exit=$?
 
           if [[ '${{ matrix.shard }}' == '1' ]]; then
             # Run both flavors on NTFS once. Rust's GetTempPath2 ignores
             # TEMP/TMP under the SYSTEM account, so override SystemTemp.
             SystemTemp='${{ steps.snapshot-temp.outputs.directory }}' \
-              cargo-nextest nextest run "${nextest_run_args[@]}" \
+              run_snapshots \
                 -E 'test(windows_case_sensitive_shims)' || test_exit=$?
 
             # Exercise the same environment wrapper under Windows PowerShell 5.1.
             VP_SNAP_PWSH_BIN="$(cygpath -w "$(command -v powershell.exe)")" \
-              cargo-nextest nextest run "${nextest_run_args[@]}" \
+              run_snapshots \
                 -E 'test(command_env_powershell)' || test_exit=$?
           fi
           exit "$test_exit"
@@ -1286,6 +1330,7 @@ jobs:
           RUST_BACKTRACE: '1'
           # Share immutable tarballs across nextest processes in this job.
           VP_SNAP_PACKAGES_DIR: ${{ runner.temp }}/snapshot-packages
+          VP_SNAP_REGISTRY_CACHE_DIR: ${{ runner.temp }}/snapshot-registry-cache
           VP_SNAP_ARTIFACTS_DIR: ${{ runner.temp }}/snapshot-artifacts
           # Keep Windows env parity with the `test` recipe in justfile.
           __COMPAT_LAYER: RunAsInvoker
@@ -1303,7 +1348,8 @@ jobs:
     name: CLI E2E test (Linux x64 musl)
     needs:
       - download-previous-rolldown-binaries
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -1331,14 +1377,18 @@ jobs:
       # Run bootstrap-cli:ci and E2E tests inside an Alpine container where musl is native.
       # Can't run on the glibc host because NAPI .node files are musl-linked.
       - name: Run E2E in Alpine container
+        env:
+          # Mirrors of official Node.js releases do not provide musl archives.
+          VP_NODE_DIST_MIRROR: https://unofficial-builds.nodejs.org/download/release
         run: |
           docker run --rm \
             -e CI=true \
             -e GITHUB_ACTIONS=true \
+            -e VP_NODE_DIST_MIRROR \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            node:22-alpine3.21 sh -ec "
-              apk add --no-cache bash curl ca-certificates git
+            node:22.23.4-alpine sh -ec "
+              apk add --no-cache bash curl ca-certificates git zip unzip
 
               # Install pnpm and re-resolve optional dependencies for musl.
               # The host node_modules has glibc bindings; pnpm store holds both
@@ -1386,7 +1436,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
     name: Cert-less image E2E test
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
@@ -1423,6 +1473,7 @@ jobs:
       - name: Run vp in node:24-bookworm-slim without a CA store
         run: |
           docker run --rm \
+            -e VP_NODE_DIST_MIRROR \
             -v "${{ github.workspace }}/target/debug/vp:/usr/local/bin/vp:ro" \
             node:24-bookworm-slim bash -c '
               set -ex
@@ -1432,7 +1483,7 @@ jobs:
               # Exercise commands on the mounted build without installing a published package.
               touch /usr/local/bin/.vp-setup-complete
               vp --version
-              # HTTPS to nodejs.org through the shared client; exits nonzero
+              # HTTPS to the Node.js mirror through the shared client; exits nonzero
               # without the bundled-roots fallback.
               vp env list-remote --lts --json > /tmp/vp-versions.json
               node -e "const versions = require(\"/tmp/vp-versions.json\"); if (!versions.node?.length) process.exit(1)"
@@ -1442,7 +1493,8 @@ jobs:
     name: Local CLI `vp install` E2E test
     needs:
       - build-cli-test-binaries
-    runs-on: namespace-profile-linux-x64-default
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Run if: not a PR, OR PR has 'test: install-e2e' label
     if: >-
       github.event_name != 'pull_request' ||
@@ -1518,7 +1570,7 @@ jobs:
     env:
       # Includes nodejs/node#61999 (first backported in Node 24.20.0).
       # Override vp's project pins; sfw's embedded Node runtime is separate.
-      VP_NODE_VERSION: '24.21.0'
+      VP_NODE_VERSION: '24.22.1'
     needs:
       - build-cli-test-binaries
     # Run if: not a PR (push-to-main / workflow_dispatch), OR PR has 'test: sfw' label.
@@ -1558,6 +1610,7 @@ jobs:
           #   vp_bin: vp.exe
           #   vp_insecure_tls: ''
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
       - uses: ./.github/actions/clone
@@ -1645,6 +1698,7 @@ jobs:
 
   done:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: always()
     needs:
       - docs-fmt

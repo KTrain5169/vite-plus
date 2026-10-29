@@ -264,6 +264,7 @@ impl HttpClient {
                 .with_min_delay(Duration::from_millis(self.min_delay))
                 .with_max_times(self.max_times),
         )
+        .when(|error| !is_not_found(error))
         .await
     }
 
@@ -462,29 +463,11 @@ fn extract_tgz_file(
 ///   covers that one file instead of the tgz.
 /// * `expected_hash` - Optional expected hash, "algorithm.hex" or SRI "algorithm-base64" (see [`verify_file_hash`])
 /// * `message` - Optional message shown above a progress bar while downloading (see [`HttpClient::download_file`])
+/// * `npm_config` - npm configuration used for the download.
 ///
 /// # Returns
 /// * `Ok(())` - If the tgz file is downloaded, verified (if hash provided) and extracted successfully.
 /// * `Err(e)` - If the tgz file is not downloaded, verified or extracted successfully.
-#[cfg(test)]
-pub(crate) async fn download_and_extract_tgz_with_hash(
-    url: &str,
-    target_dir: impl AsRef<Path>,
-    archive_file: Option<&Path>,
-    expected_hash: Option<&str>,
-    message: Option<&str>,
-) -> Result<(), Error> {
-    download_and_extract_tgz_with_hash_and_config(
-        url,
-        target_dir,
-        archive_file,
-        expected_hash,
-        message,
-        &NpmConfig::load(),
-    )
-    .await
-}
-
 pub(crate) async fn download_and_extract_tgz_with_hash_and_config(
     url: &str,
     target_dir: impl AsRef<Path>,
@@ -614,10 +597,15 @@ async fn download_and_extract_tgz_once(
 ///   from a `spawn_blocking` panic, …) is permanent and is not retried.
 fn is_retryable_download_error(err: &Error) -> bool {
     match err {
-        Error::Reqwest(e) => e.status() != Some(StatusCode::NOT_FOUND),
+        Error::Reqwest(_) => !is_not_found(err),
         Error::Io(_) | Error::IoWithPath { .. } | Error::HashMismatch { .. } => true,
         _ => false,
     }
+}
+
+/// A registry 404 means the package, version, or dist-tag does not exist, so retrying cannot help.
+pub(crate) fn is_not_found(err: &Error) -> bool {
+    matches!(err, Error::Reqwest(e) if e.status() == Some(StatusCode::NOT_FOUND))
 }
 
 /// Compute the digest of a file in chunks.
@@ -1223,7 +1211,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let target_file = temp_dir.path().join("test.txt");
 
-        server.mock(|when, then| {
+        let mock = server.mock(|when, then| {
             when.method(GET).path("/server_error");
             then.status(500).body("Internal Server Error");
         });
@@ -1233,8 +1221,10 @@ mod tests {
 
         // Should fail after retries
         let result = client.download_file(&url, &target_file, None).await;
-        // println!("result: {:?}", result);
         assert!(result.is_err(), "Expected download to fail with 500 after retries");
+
+        // Should try 3 times, 1 for first request, 2 for retries
+        mock.assert_hits(3);
     }
 
     #[tokio::test]
@@ -1252,7 +1242,15 @@ mod tests {
         });
 
         let url = vt_str::format!("{}/test-package.tgz", server.base_url());
-        let result = download_and_extract_tgz_with_hash(&url, &target_dir, None, None, None).await;
+        let result = download_and_extract_tgz_with_hash_and_config(
+            &url,
+            &target_dir,
+            None,
+            None,
+            None,
+            &NpmConfig { values: Default::default() },
+        )
+        .await;
         assert!(result.is_ok(), "Failed to download and extract: {result:?}");
 
         assert!(target_dir.join("package/bin/yarn").exists());
@@ -1284,7 +1282,15 @@ mod tests {
         let target_dir = temp_dir.path().join("extracted");
         let url = vt_str::format!("{}/corrupt.tgz", server.base_url());
 
-        let result = download_and_extract_tgz_with_hash(&url, &target_dir, None, None, None).await;
+        let result = download_and_extract_tgz_with_hash_and_config(
+            &url,
+            &target_dir,
+            None,
+            None,
+            None,
+            &NpmConfig { values: Default::default() },
+        )
+        .await;
         assert!(result.is_err(), "corrupt archive should fail to extract: {result:?}");
         assert!(
             mock.hits() > 1,
@@ -1311,9 +1317,15 @@ mod tests {
         let wrong_hash = "sha512.0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000";
 
-        let result =
-            download_and_extract_tgz_with_hash(&url, &target_dir, None, Some(wrong_hash), None)
-                .await;
+        let result = download_and_extract_tgz_with_hash_and_config(
+            &url,
+            &target_dir,
+            None,
+            Some(wrong_hash),
+            None,
+            &NpmConfig { values: Default::default() },
+        )
+        .await;
         assert!(result.is_err(), "hash mismatch should fail: {result:?}");
         assert!(
             mock.hits() > 1,
@@ -1403,7 +1415,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Flaky on musl/Alpine — temp file race condition
     async fn test_verify_file_hash_sha1() {
         use sha1::Sha1;
         use sha2::Digest;
@@ -1416,6 +1427,8 @@ mod tests {
         let content = b"Hello, World!";
         let mut file = tokio::fs::File::create(&test_file).await.unwrap();
         file.write_all(content).await.unwrap();
+        // Finish the background write before hashing through another file handle.
+        file.flush().await.unwrap();
 
         // Calculate expected SHA1
         let mut hasher = Sha1::new();
@@ -1424,12 +1437,12 @@ mod tests {
 
         // Test successful verification
         let result = verify_file_hash(&test_file, &expected_hash).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
 
         // Test failed verification
         let wrong_hash = "sha1.0000000000000000000000000000000000000000";
         let result = verify_file_hash(&test_file, wrong_hash).await;
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::HashMismatch { .. })), "{result:?}");
     }
 
     #[tokio::test]
@@ -1464,7 +1477,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Flaky on musl/Alpine — temp file race condition
     async fn test_verify_file_hash_sha224() {
         use sha2::{Digest, Sha224};
         use tokio::io::AsyncWriteExt;
@@ -1476,6 +1488,8 @@ mod tests {
         let content = b"Test content for SHA224";
         let mut file = tokio::fs::File::create(&test_file).await.unwrap();
         file.write_all(content).await.unwrap();
+        // Finish the background write before hashing through another file handle.
+        file.flush().await.unwrap();
 
         // Calculate expected SHA224
         let mut hasher = Sha224::new();
@@ -1484,12 +1498,12 @@ mod tests {
 
         // Test successful verification
         let result = verify_file_hash(&test_file, &expected_hash).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
 
         // Test failed verification
         let wrong_hash = "sha224.00000000000000000000000000000000000000000000000000000000";
         let result = verify_file_hash(&test_file, wrong_hash).await;
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::HashMismatch { .. })), "{result:?}");
     }
 
     #[tokio::test]

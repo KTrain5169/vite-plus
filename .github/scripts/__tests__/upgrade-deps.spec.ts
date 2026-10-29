@@ -44,13 +44,24 @@ test.each([false, true])(
     const workspacePath = join(tempDir, 'pnpm-workspace.yaml');
     writeFileSync(
       workspacePath,
-      readFileSync(workspacePath, 'utf8').replace(/  lint-staged: .+/, '  lint-staged: ^16.2.6'),
+      readFileSync(workspacePath, 'utf8')
+        .replace(/  lint-staged: .+/, '  lint-staged: ^16.2.6')
+        .replace(/^  oxc-(?:minify|transform): .+\n/gm, ''),
     );
 
     vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.stubEnv('UPGRADE_DEPS_META_DIR', metaDir);
+    // Each run also covers one side of the oxc-node pin guard: a release that does not
+    // contain the pinned commit leaves the pin alone.
+    const pinnedOxcNode = JSON.parse(
+      readFileSync(join(tempDir, 'packages/tools/.upstream-versions.json'), 'utf8'),
+    )['oxc-node'].hash;
     vi.stubGlobal('fetch', async (url: string) => {
+      if (url.startsWith('https://api.github.com/repos/oxc-project/oxc-node/compare/')) {
+        expect(url).toContain(`/compare/${pinnedOxcNode}...`);
+        return Response.json({ status: failInstall ? 'diverged' : 'ahead' });
+      }
       if (url.startsWith('https://api.github.com/repos/')) {
         return Response.json([{ name: 'v1.2.3', commit: { sha: 'a'.repeat(40) } }]);
       }
@@ -71,6 +82,12 @@ test.each([false, true])(
       }
       if (url === 'https://registry.npmjs.org/oxlint-tsgolint/latest') {
         return Response.json({ version: '7.0.2004' });
+      }
+      if (
+        url === 'https://registry.npmjs.org/oxc-minify/latest' ||
+        url === 'https://registry.npmjs.org/oxc-transform/latest'
+      ) {
+        throw new Error('Unused root catalog packages must not be updated');
       }
       if (url.startsWith('https://registry.npmjs.org/') && url.endsWith('/latest')) {
         return Response.json({ version: '1.2.3' });
@@ -121,6 +138,13 @@ test.each([false, true])(
     expect(versions['@oxlint/plugins'].new).toBe('1.88.0');
     expect(versions['@oxlint/plugins'].new).toBe(versions.oxlint.new);
     expect(versions['oxlint-tsgolint'].new).toBe('7.0.2004');
+    expect(versions).not.toHaveProperty('oxc-minify');
+    expect(versions).not.toHaveProperty('oxc-transform');
+    expect(versions['oxc-node']).toEqual(
+      failInstall
+        ? { old: pinnedOxcNode, new: pinnedOxcNode }
+        : { old: pinnedOxcNode, new: 'a'.repeat(40), tag: 'v1.2.3' },
+    );
     if (!failInstall) {
       expect(versions['yuku-parser']).toEqual({ old: '^0.9.3', new: '0.11.2' });
     }

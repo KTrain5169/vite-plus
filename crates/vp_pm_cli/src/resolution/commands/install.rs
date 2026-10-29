@@ -4,8 +4,9 @@ use super::parse_positive_usize;
 use crate::{
     Error, PackageManager,
     resolution::{
-        AddArgs, Bun, CommandBuilder, CommandResolution, DiagnosticKind, Diagnostics, Npm, Pnpm,
-        Resolution, Resolve, SaveDependencyArgs, Yarn, resolve_for_manager,
+        AddArgs, Bun, CommandBuilder, CommandResolution, DiagnosticKind, Diagnostics, Npm,
+        PackageManagerDialect, Pnpm, Resolution, Resolve, SaveDependencyArgs, Yarn,
+        resolve_for_manager,
     },
 };
 
@@ -51,15 +52,15 @@ pub struct InstallArgs {
     pub(crate) force: bool,
 
     /// Do not run lifecycle scripts
-    #[arg(long)]
+    #[arg(long, not_supported(yarn >= "2" && < "2.4.0"))]
     pub(crate) ignore_scripts: bool,
 
     /// Don't read or generate lockfile
     #[arg(long, not_supported(yarn >= "2", bun))]
     pub(crate) no_lockfile: bool,
 
-    /// Fix broken lockfile entries (pnpm and yarn@2+ only)
-    #[arg(long, not_supported(npm, bun, yarn < "2"))]
+    /// Fix broken lockfile entries (pnpm and yarn@4+ only)
+    #[arg(long, not_supported(npm, bun, yarn < "4"))]
     pub(crate) fix_lockfile: bool,
 
     /// Create flat `node_modules` (pnpm only)
@@ -75,11 +76,11 @@ pub struct InstallArgs {
     pub(crate) silent: bool,
 
     /// Filter packages in monorepo (can be used multiple times)
-    #[arg(long, value_name = "PATTERN", not_supported(yarn < "2"))]
+    #[arg(long, value_name = "PATTERN", not_supported(npm < "7.14.0", yarn < "2"))]
     pub(crate) filter: Vec<String>,
 
     /// Install in workspace root only
-    #[arg(short = 'w', long, not_supported(yarn, bun))]
+    #[arg(short = 'w', long, not_supported(npm < "8.1.0", yarn, bun))]
     pub(crate) workspace_root: bool,
 
     /// Save exact version (only when adding packages)
@@ -240,9 +241,15 @@ impl Resolve<InstallArgs> for Npm {
         let use_ci = args.frozen_lockfile && !args.no_frozen_lockfile;
         let mut cmd = CommandBuilder::new("npm");
         cmd.arg(if use_ci { "ci" } else { "install" });
-        cmd.arg_if("--omit=dev", args.prod)
-            .arg_if("--include=dev", args.dev)
-            .arg_if("--omit=optional", args.no_optional);
+        if self.supports_v7_commands() {
+            cmd.arg_if("--omit=dev", args.prod)
+                .arg_if("--include=dev", args.dev)
+                .arg_if("--omit=optional", args.no_optional);
+        } else {
+            cmd.arg_if("--production", args.prod)
+                .arg_if("--production=false", args.dev)
+                .arg_if("--no-optional", args.no_optional);
+        }
         cmd.arg_if("--package-lock-only", args.lockfile_only && !use_ci)
             .arg_if("--prefer-offline", args.prefer_offline)
             .arg_if("--offline", args.offline)
@@ -262,7 +269,7 @@ impl Resolve<InstallArgs> for Npm {
 impl Resolve<InstallArgs> for Yarn {
     fn resolve(&self, args: &InstallArgs, diag: &mut Diagnostics) -> CommandResolution {
         if self.is_berry() {
-            Yarn::resolve_berry_install(args, diag)
+            self.resolve_berry_install(args, diag)
         } else {
             Yarn::resolve_v1_install(args, diag)
         }
@@ -291,7 +298,11 @@ impl Yarn {
         cmd.into()
     }
 
-    fn resolve_berry_install(args: &InstallArgs, diag: &mut Diagnostics) -> CommandResolution {
+    fn resolve_berry_install(
+        &self,
+        args: &InstallArgs,
+        diag: &mut Diagnostics,
+    ) -> CommandResolution {
         let mut cmd = CommandBuilder::new("yarn");
         if !args.filter.is_empty() {
             cmd.arg("workspaces").arg("foreach").arg("-A");
@@ -303,7 +314,7 @@ impl Yarn {
         } else {
             cmd.arg_if("--immutable", args.frozen_lockfile);
         }
-        Self::apply_berry_install_mode(&mut cmd, args.lockfile_only, args.ignore_scripts, diag);
+        self.apply_berry_install_mode(&mut cmd, args.lockfile_only, args.ignore_scripts, diag);
         if args.prod {
             diag.warn(
                 DiagnosticKind::BehaviorChange,
@@ -315,6 +326,7 @@ impl Yarn {
     }
 
     pub(super) fn apply_berry_install_mode(
+        &self,
         cmd: &mut CommandBuilder,
         lockfile_only: bool,
         ignore_scripts: bool,
@@ -329,7 +341,11 @@ impl Yarn {
                 );
             }
         } else if ignore_scripts {
-            cmd.arg("--mode").arg("skip-build");
+            if self.version().is_some_and(|version| version.major == 2) {
+                cmd.arg("--skip-builds");
+            } else {
+                cmd.arg("--mode").arg("skip-build");
+            }
         }
     }
 }
@@ -571,6 +587,32 @@ mod tests {
         );
 
         assert_eq!(command.args, vec!["install", "--omit=dev"]);
+    }
+
+    #[test]
+    fn npm_dependency_filter_version_boundaries() {
+        for (version, filters) in [
+            ("6.14.18", vec!["--production", "--production=false", "--no-optional"]),
+            ("7.0.0", vec!["--omit=dev", "--include=dev", "--omit=optional"]),
+            ("12.2.1", vec!["--omit=dev", "--include=dev", "--omit=optional"]),
+        ] {
+            for frozen_lockfile in [false, true] {
+                let args = InstallArgs {
+                    prod: true,
+                    dev: true,
+                    no_optional: true,
+                    frozen_lockfile,
+                    pass_through_args: vec!["--production=true".into()],
+                    ..Default::default()
+                };
+                let resolution = resolve(&npm(version), args);
+                assert!(resolution.diagnostics.is_empty());
+                let mut expected = vec![if frozen_lockfile { "ci" } else { "install" }];
+                expected.extend(&filters);
+                expected.push("--production=true");
+                assert_eq!(expect_run(resolution.outcome).args, expected, "npm {version}");
+            }
+        }
     }
 
     #[test]
