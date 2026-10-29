@@ -25,14 +25,14 @@ describe('detectMigrationWarnings', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('detects matching packages and config files', () => {
+  it('detects matching packages and config file variants', () => {
     writeProject(
       tmpDir,
       {
         devDependencies: { rollup: '^4.0.0', jest: '^30.0.0' },
         dependencies: { rolldown: '^1.0.0' },
       },
-      ['rollup.config.ts', 'rolldown.config.ts', 'jest.config.ts'],
+      ['rollup.config.mjs', 'rolldown.config.cjs', 'jest.config.json'],
     );
 
     expect(detectMigrationWarnings(tmpDir)).toEqual([
@@ -46,6 +46,17 @@ describe('detectMigrationWarnings', () => {
     writeProject(tmpDir, { devDependencies: { rollup: '^4.0.0' } }, ['jest.config.ts']);
 
     expect(detectMigrationWarnings(tmpDir)).toEqual([]);
+  });
+
+  it('detects Jest configuration in package.json', () => {
+    writeProject(tmpDir, {
+      devDependencies: { jest: '^30.0.0' },
+      jest: { testEnvironment: 'node' },
+    });
+
+    expect(detectMigrationWarnings(tmpDir)).toEqual([
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+    ]);
   });
 
   it('detects matching packages and configs in workspace packages', () => {

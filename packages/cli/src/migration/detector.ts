@@ -60,21 +60,28 @@ export const PRETTIER_CONFIG_FILES = [
   'prettier.config.mts',
 ] as const;
 
+const CONFIG_SCRIPT_EXTENSIONS = ['js', 'mjs', 'cjs', 'ts', 'mts', 'cts'] as const;
+
 const MIGRATION_WARNING_DETECTIONS = [
   {
     packageName: 'rollup',
-    configFile: 'rollup.config.ts',
+    configFiles: CONFIG_SCRIPT_EXTENSIONS.map((extension) => `rollup.config.${extension}`),
     warning:
       'Rollup configuration detected. Rollup is API-compatible with Rolldown and can be migrated first before migrating further to tsdown or Vite. Once migrated to tsdown or Vite, re-run vp migrate.',
   },
   {
     packageName: 'rolldown',
-    configFile: 'rolldown.config.ts',
-    warning: 'Rolldown configuration detected. Rolldown can be migrated to tsdown or Vite, and it is recommended to do so. Once migrated, re-run vp migrate.',
+    configFiles: CONFIG_SCRIPT_EXTENSIONS.map((extension) => `rolldown.config.${extension}`),
+    warning:
+      'Rolldown configuration detected. Rolldown can be migrated to tsdown or Vite, and it is recommended to do so. Once migrated, re-run vp migrate.',
   },
   {
     packageName: 'jest',
-    configFile: 'jest.config.ts',
+    configFiles: [
+      ...CONFIG_SCRIPT_EXTENSIONS.map((extension) => `jest.config.${extension}`),
+      'jest.config.json',
+    ],
+    packageJsonField: 'jest',
     warning:
       'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
   },
@@ -117,7 +124,11 @@ export function detectMigrationWarnings(
     for (const detection of MIGRATION_WARNING_DETECTIONS) {
       if (
         hasDependency(packageJson, detection.packageName) &&
-        fs.existsSync(path.join(currentPath, detection.configFile))
+        (detection.configFiles.some((configFile) =>
+          fs.existsSync(path.join(currentPath, configFile)),
+        ) ||
+          ('packageJsonField' in detection &&
+            Object.hasOwn(packageJson, detection.packageJsonField)))
       ) {
         detected.add(detection.warning);
       }
