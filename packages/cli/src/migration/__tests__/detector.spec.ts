@@ -68,4 +68,13 @@ describe('detectMigrationWarnings', () => {
       'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
     ]);
   });
+
+  it('detects workspace configs with dependencies declared at the root', () => {
+    writeProject(tmpDir, { devDependencies: { jest: '^30.0.0' } });
+    writeProject(path.join(tmpDir, 'packages/app'), {}, ['jest.config.js']);
+
+    expect(detectMigrationWarnings(tmpDir, [{ name: 'app', path: 'packages/app' }])).toEqual([
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+    ]);
+  });
 });

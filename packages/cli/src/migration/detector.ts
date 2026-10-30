@@ -107,6 +107,7 @@ export function detectMigrationWarnings(
     ...packages.map((workspacePackage) => path.join(projectPath, workspacePackage.path)),
   ];
   const detected = new Set<string>();
+  let rootPackageJson: Record<string, unknown> | undefined;
 
   for (const currentPath of projectPaths) {
     const packageJsonPath = path.join(currentPath, 'package.json');
@@ -120,10 +121,16 @@ export function detectMigrationWarnings(
     } catch {
       continue;
     }
+    if (currentPath === projectPath) {
+      rootPackageJson = packageJson;
+    }
 
     for (const detection of MIGRATION_WARNING_DETECTIONS) {
       if (
-        hasDependency(packageJson, detection.packageName) &&
+        (hasDependency(packageJson, detection.packageName) ||
+          (currentPath !== projectPath &&
+            rootPackageJson !== undefined &&
+            hasDependency(rootPackageJson, detection.packageName))) &&
         (detection.configFiles.some((configFile) =>
           fs.existsSync(path.join(currentPath, configFile)),
         ) ||
