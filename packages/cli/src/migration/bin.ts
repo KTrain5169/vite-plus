@@ -1071,10 +1071,10 @@ async function main() {
     let finalInstallOk = true;
     let canFormatMigratedProject = !process.env.VP_SKIP_INSTALL;
     const report = createMigrationReport();
-    const migrationWarnings = detectMigrationWarnings(
-      workspaceInfoOptional.rootDir,
-      workspaceInfoOptional.packages,
-    );
+    // Only --full opts existing projects into tool migration advice.
+    const migrationWarnings = options.full
+      ? detectMigrationWarnings(workspaceInfoOptional.rootDir, workspaceInfoOptional.packages)
+      : [];
     // Report reviews at the end with updated locations. Keep them out of the
     // report until then so review-only items do not force an up-to-date project
     // through dependency reconciliation on every run.
