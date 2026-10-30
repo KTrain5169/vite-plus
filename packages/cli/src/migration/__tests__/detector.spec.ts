@@ -38,7 +38,7 @@ describe('detectMigrationWarnings', () => {
     expect(detectMigrationWarnings(tmpDir)).toEqual([
       'Rollup configuration detected. Rollup is API-compatible with Rolldown and can be migrated first before migrating further to tsdown or Vite. Once migrated to tsdown or Vite, re-run vp migrate.',
       'Rolldown configuration detected. Rolldown can be migrated to tsdown or Vite, and it is recommended to do so. Once migrated, re-run vp migrate.',
-      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration/jest, then re-run vp migrate.',
     ]);
   });
 
@@ -55,7 +55,7 @@ describe('detectMigrationWarnings', () => {
     });
 
     expect(detectMigrationWarnings(tmpDir)).toEqual([
-      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration/jest, then re-run vp migrate.',
     ]);
   });
 
@@ -65,7 +65,7 @@ describe('detectMigrationWarnings', () => {
     ]);
 
     expect(detectMigrationWarnings(tmpDir, [{ name: 'app', path: 'packages/app' }])).toEqual([
-      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration/jest, then re-run vp migrate.',
     ]);
   });
 
@@ -74,7 +74,7 @@ describe('detectMigrationWarnings', () => {
     writeProject(path.join(tmpDir, 'packages/app'), {}, ['jest.config.js']);
 
     expect(detectMigrationWarnings(tmpDir, [{ name: 'app', path: 'packages/app' }])).toEqual([
-      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration/jest, then re-run vp migrate.',
     ]);
   });
 });

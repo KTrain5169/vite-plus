@@ -83,7 +83,7 @@ const MIGRATION_WARNING_DETECTIONS = [
     ],
     packageJsonField: 'jest',
     warning:
-      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration.html#jest, then re-run vp migrate.',
+      'Jest configuration detected. Vitest is highly compatible with Jest, and so we recommend migrating. See the Vitest Jest migration guide: https://vitest.dev/guide/migration/jest, then re-run vp migrate.',
   },
 ] as const;
 
